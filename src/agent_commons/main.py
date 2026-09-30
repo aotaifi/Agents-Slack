@@ -3,14 +3,16 @@ import json
 import os
 from datetime import timezone
 from pathlib import Path
+from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select, text, update
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from .db import make_engine, session_factory
+from .identity import choose_handle
 from .models import (
     Actor,
     Channel,
@@ -20,6 +22,7 @@ from .models import (
     Message,
     Project,
     RateWindow,
+    Reaction,
     Thread,
     Token,
     now,
@@ -30,6 +33,7 @@ from .schemas import (
     MessageInput,
     MuteInput,
     ProjectInput,
+    ReactionInput,
     RulesInput,
     ThreadInput,
 )
@@ -37,7 +41,30 @@ from .security import digest, issue_token
 
 
 def actor_json(a):
-    return {k: getattr(a, k) for k in ("id", "name", "kind", "owner_id", "is_admin")}
+    db = object_session(a)
+    owner = db.get(Actor, a.owner_id) if db and a.owner_id else None
+    return {
+        **{k: getattr(a, k) for k in ("id", "name", "handle", "kind", "owner_id", "is_admin")},
+        "owner": {k: getattr(owner, k) for k in ("id", "name", "handle")} if owner else None,
+    }
+
+
+def reaction_actor(a):
+    return {k: getattr(a, k) for k in ("id", "name", "handle", "kind")}
+
+
+def reactions_json(db, message_id):
+    groups = {}
+    for reaction, actor in db.execute(
+        select(Reaction, Actor)
+        .join(Actor, Actor.id == Reaction.actor_id)
+        .where(Reaction.message_id == message_id)
+        .order_by(Reaction.emoji, Actor.handle, Actor.id)
+    ):
+        groups.setdefault(reaction.emoji, []).append(reaction_actor(actor))
+    return [
+        {"emoji": emoji, "actors": actors, "count": len(actors)} for emoji, actors in groups.items()
+    ]
 
 
 def project_json(p):
@@ -48,8 +75,12 @@ def channel_json(c):
     return {k: getattr(c, k) for k in ("id", "project_id", "name", "description")}
 
 
+def utc(value):
+    return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
 def timestamp(value):
-    return value.replace(tzinfo=timezone.utc).isoformat()
+    return utc(value).isoformat()
 
 
 def thread_json(t):
@@ -71,6 +102,11 @@ def message_json(db, m):
         },
         "author": actor_json(db.get(Actor, m.author_id)),
         "metadata": m.data,
+        "reply_to": m.reply_to,
+        "reactions": reactions_json(db, m.id),
+        "reply_count": db.scalar(
+            select(func.count()).select_from(Message).where(Message.reply_to == m.id)
+        ),
         "created_at": timestamp(m.created_at),
     }
 
@@ -83,7 +119,7 @@ def event_json(e):
 
 
 def create_app(database_url: str | None = None):
-    app = FastAPI(title="Agent Commons", version="0.1.0")
+    app = FastAPI(title="Research Workspace", version="0.1.0")
     engine = make_engine(database_url)
     factory = session_factory(engine)
     app.state.engine = engine
@@ -153,6 +189,23 @@ def create_app(database_url: str | None = None):
         db.flush()
         return e
 
+    def enforce_rate(db, p, a):
+        current = now()
+        window = db.get(RateWindow, (p.id, a.id))
+        if window is None:
+            window = RateWindow(project_id=p.id, actor_id=a.id, started_at=current, count=0)
+            db.add(window)
+        elapsed = (current - utc(window.started_at)).total_seconds()
+        if elapsed >= 60:
+            window.started_at, window.count = current, 0
+        elif window.count >= app.state.posting_limit:
+            raise HTTPException(
+                429,
+                "Posting rate limit exceeded",
+                headers={"Retry-After": str(max(1, int(60 - elapsed) + 1))},
+            )
+        window.count += 1
+
     @app.get("/health")
     def health(db: Session = Depends(session, scope="function")):
         try:
@@ -184,8 +237,19 @@ def create_app(database_url: str | None = None):
         human(a)
         if body.kind == "human" and not a.is_admin:
             raise HTTPException(403, "Administrator required")
+        if engine.dialect.name == "postgresql":
+            db.execute(text("SELECT pg_advisory_xact_lock(731958240)"))
+        try:
+            handle = choose_handle(db, body.name, a if body.kind == "agent" else None, body.handle)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from None
+        except FileExistsError:
+            raise HTTPException(409, "Handle already exists") from None
         actor = Actor(
-            name=body.name, kind=body.kind, owner_id=a.id if body.kind == "agent" else None
+            name=body.name,
+            handle=handle,
+            kind=body.kind,
+            owner_id=a.id if body.kind == "agent" else None,
         )
         db.add(actor)
         db.flush()
@@ -429,9 +493,16 @@ def create_app(database_url: str | None = None):
         db: Session = Depends(session, scope="function"),
     ):
         t, p = resource(db, a, Thread, thread_id, write=True)
+        explicit = str(body.reply_to) if body.reply_to else None
+        fingerprint_body = body.model_dump(mode="json")
+        # Keep pre-migration retry keys valid for requests using the legacy shape.
+        if "reply_to" not in body.model_fields_set or explicit is None:
+            fingerprint_body.pop("reply_to")
+        else:
+            fingerprint_body["reply_to"] = explicit
         fingerprint = hashlib.sha256(
             json.dumps(
-                {"thread_id": thread_id, **body.model_dump()},
+                {"thread_id": thread_id, **fingerprint_body},
                 sort_keys=True,
                 separators=(",", ":"),
                 allow_nan=False,
@@ -446,29 +517,29 @@ def create_app(database_url: str | None = None):
                     raise HTTPException(409, "Idempotency-Key was used for another request")
                 response.status_code = 200
                 return message_json(db, db.get(Message, previous.message_id))
+        legacy = body.metadata.get("reply_to")
+        if legacy is not None:
+            try:
+                legacy = str(UUID(str(legacy)))
+            except ValueError:
+                raise HTTPException(422, "Invalid metadata.reply_to") from None
+        if "reply_to" in body.model_fields_set and legacy and explicit != legacy:
+            raise HTTPException(422, "Conflicting reply_to fields")
+        reply_to = explicit if "reply_to" in body.model_fields_set else legacy
+        if reply_to:
+            parent = db.get(Message, reply_to)
+            if parent is None or parent.thread_id != t.id or parent.reply_to is not None:
+                raise HTTPException(422, "Reply must reference a top-level message in this thread")
         for actor_id in body.mentions:
             if not db.get(Membership, (p.id, actor_id)):
                 raise HTTPException(422, "Mentioned actor is not a project member")
-        current = now()
-        window = db.get(RateWindow, (p.id, a.id))
-        if window is None:
-            window = RateWindow(project_id=p.id, actor_id=a.id, started_at=current, count=0)
-            db.add(window)
-        elapsed = (current - window.started_at.replace(tzinfo=timezone.utc)).total_seconds()
-        if elapsed >= 60:
-            window.started_at, window.count = current, 0
-        elif window.count >= app.state.posting_limit:
-            raise HTTPException(
-                429,
-                "Posting rate limit exceeded",
-                headers={"Retry-After": str(max(1, int(60 - elapsed) + 1))},
-            )
-        window.count += 1
+        enforce_rate(db, p, a)
         m = Message(
             thread_id=t.id,
             project_id=p.id,
             author_id=a.id,
             text=body.text,
+            reply_to=reply_to,
             mentions=body.mentions,
             data=body.metadata,
             sequence=p.cursor + 1,
@@ -488,6 +559,150 @@ def create_app(database_url: str | None = None):
                 )
             )
         return result
+
+    def change_reaction(message_id, body, a, db, adding):
+        m, p = resource(db, a, Message, message_id, write=True)
+        key = (m.id, a.id, body.emoji)
+        existing = db.get(Reaction, key)
+        if (adding and existing is None) or (not adding and existing is not None):
+            enforce_rate(db, p, a)
+            if adding:
+                db.add(Reaction(message_id=m.id, actor_id=a.id, emoji=body.emoji))
+            else:
+                db.delete(existing)
+            db.flush()
+            emit(
+                db,
+                p,
+                "reaction.added" if adding else "reaction.removed",
+                {
+                    "message_id": m.id,
+                    "emoji": body.emoji,
+                    "actor": reaction_actor(a),
+                    "reactions": reactions_json(db, m.id),
+                },
+                m.thread_id,
+            )
+        return message_json(db, m)
+
+    @app.put("/v1/messages/{message_id}/reactions")
+    def add_reaction(
+        message_id: str,
+        body: ReactionInput,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        return change_reaction(message_id, body, a, db, True)
+
+    @app.delete("/v1/messages/{message_id}/reactions")
+    def remove_reaction(
+        message_id: str,
+        body: ReactionInput,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        return change_reaction(message_id, body, a, db, False)
+
+    @app.get("/v1/threads/{thread_id}/context")
+    def context(
+        thread_id: str,
+        limit: int = Query(20, ge=1, le=100),
+        trigger_message_id: UUID | None = None,
+        max_chars: int = Query(12000, ge=1000, le=50000),
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        t, p = resource(db, a, Thread, thread_id)
+        snapshot = p.cursor
+        rows = list(
+            db.scalars(
+                select(Message)
+                .where(Message.thread_id == t.id, Message.sequence <= snapshot)
+                .order_by(Message.sequence.desc())
+                .limit(limit + 1)
+            )
+        )
+        trigger = db.get(Message, str(trigger_message_id)) if trigger_message_id else None
+        if trigger_message_id and (
+            trigger is None or trigger.thread_id != t.id or trigger.sequence > snapshot
+        ):
+            raise HTTPException(404, "Trigger message not found")
+        parent = db.get(Message, trigger.reply_to) if trigger and trigger.reply_to else None
+        remaining = max_chars
+
+        def clipped(value, allowance):
+            nonlocal remaining
+            original = value["text"]
+            take = min(remaining, allowance, len(original))
+            value["text"] = original[:take]
+            remaining -= take
+            if take < len(original):
+                value["truncated"] = True
+            return value
+
+        rules = clipped({"text": p.rules, "version": p.rules_version}, max_chars // 4)
+        trigger_data = clipped(message_json(db, trigger), max_chars // 4) if trigger else None
+        parent_data = clipped(message_json(db, parent), max_chars // 4) if parent else None
+        # Distribute remaining text over recent messages, giving newer messages first claim.
+        recent = []
+        selected = rows[:limit]
+        for index, message in enumerate(selected):
+            allowance = remaining // (len(selected) - index)
+            recent.append(clipped(message_json(db, message), allowance))
+        recent.reverse()
+        return {
+            "thread": thread_json(t),
+            "rules": rules,
+            "messages": recent,
+            "cursor": snapshot,
+            "has_older": len(rows) > limit,
+            "trigger_message": trigger_data,
+            "parent_message": parent_data,
+        }
+
+    @app.get("/v1/projects/{project_id}/inbox")
+    def inbox(
+        project_id: str,
+        after: int = Query(0, ge=0),
+        limit: int = Query(50, ge=1, le=500),
+        followed_thread_ids: list[UUID] = Query(default=[]),
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        p = project_access(db, a, project_id)
+        if len(followed_thread_ids) > 100:
+            raise HTTPException(422, "At most 100 followed threads are allowed")
+        followed = {str(value) for value in followed_thread_ids}
+        for thread_id in followed:
+            thread = db.get(Thread, thread_id)
+            if thread is None or thread.project_id != p.id:
+                raise HTTPException(404, "Followed thread not found")
+        snapshot = p.cursor
+        rows = list(
+            db.scalars(
+                select(Event)
+                .where(Event.project_id == p.id, Event.id > after, Event.id <= snapshot)
+                .order_by(Event.id)
+                .limit(1000)
+            )
+        )
+        items, scanned = [], after
+        for event in rows:
+            scanned = event.id
+            payload = event.payload
+            if (
+                event.type == "message.created"
+                and payload.get("author", {}).get("id") != a.id
+                and (a.id in payload.get("mentions", []) or event.thread_id in followed)
+            ):
+                items.append(event_json(event))
+                if len(items) == limit:
+                    break
+        return {
+            "items": items,
+            "next_cursor": scanned if scanned < snapshot else None,
+            "cursor": snapshot,
+        }
 
     @app.get("/v1/threads/{thread_id}/messages")
     def messages(
