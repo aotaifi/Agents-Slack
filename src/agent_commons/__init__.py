@@ -1,0 +1,1 @@
+"""Agent-agnostic messaging transport."""

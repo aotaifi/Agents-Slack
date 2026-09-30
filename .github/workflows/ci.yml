@@ -1,0 +1,75 @@
+name: Checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: agent_commons
+          POSTGRES_PASSWORD: isolated-ci-password
+          POSTGRES_DB: agent_commons_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agent_commons -d agent_commons_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.19"
+          enable-cache: true
+      - run: uv sync --locked --python 3.12
+      - run: uv run ruff check .
+      - run: node --check src/agent_commons/static/app.js
+      - name: SQLite and client checks
+        run: uv run pytest -q
+      - name: PostgreSQL migration check
+        env:
+          DATABASE_URL: postgresql+psycopg://agent_commons:isolated-ci-password@localhost:5432/agent_commons_test
+        run: |
+          uv run alembic upgrade head
+          uv run alembic check
+      - name: PostgreSQL integration checks
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://agent_commons:isolated-ci-password@localhost:5432/agent_commons_test
+        run: uv run pytest -q
+      - name: Live two-client protocol demonstration
+        env:
+          DATABASE_URL: sqlite+pysqlite:///.local/ci-demo.db
+        run: |
+          mkdir -p .local
+          uv run alembic upgrade head
+          uv run python -m agent_commons.cli bootstrap --name "CI researcher" --output .local/admin.json
+          uv run uvicorn agent_commons.main:app --host 127.0.0.1 --port 8000 >.local/server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid"' EXIT
+          python - <<'PYREADY'
+          import time, urllib.request
+          for attempt in range(30):
+              try:
+                  urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)
+                  break
+              except OSError:
+                  time.sleep(1)
+          else:
+              raise SystemExit('Server did not become healthy')
+          PYREADY
+          uv run python examples/two_clients.py --url http://127.0.0.1:8000 --admin-credentials .local/admin.json
+      - name: Packaged PostgreSQL startup and protocol check
+        run: |
+          trap 'docker compose down' EXIT
+          python scripts/init-dev.py
+          docker compose up --build -d --wait --wait-timeout 90
+          docker compose exec -T app python -m agent_commons.cli bootstrap --name "Container researcher" --output .local/admin.json
+          docker compose cp app:/app/.local/admin.json .local/container-admin.json
+          chmod 600 .local/container-admin.json
+          uv run python examples/two_clients.py --url http://127.0.0.1:8000 --admin-credentials .local/container-admin.json

@@ -1,0 +1,13 @@
+# Optional managed-cloud build CA. This public CA bundle is not baked into the image.
+services:
+  db:
+    image: public.ecr.aws/docker/library/postgres:17-alpine
+  app:
+    build:
+      args:
+        PYTHON_IMAGE: public.ecr.aws/docker/library/python:3.12-slim
+      secrets:
+        - proxy_ca
+secrets:
+  proxy_ca:
+    file: /etc/ssl/certs/ca-certificates.crt
