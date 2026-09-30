@@ -28,6 +28,7 @@
         <div class="account-area"><span id="connection-status" class="connection"><i></i> Ready</span><button id="account-button" class="identity-button" hidden></button><button id="signout" class="text-button" hidden>Sign out</button></div>
       </header>
 
+      <div id="credential-recovery" class="credential-recovery" hidden></div>
       <section id="signin-view" class="signin-wrap">
         <div class="signin-card">
           <div class="eyebrow">Research Workspace</div>
@@ -40,10 +41,13 @@
             <button class="primary-button signin-submit" type="submit">Continue <span aria-hidden="true">→</span></button>
             <div id="signin-error" class="form-error" role="alert"></div>
           </form>
-          <div class="signin-foot">Need access? Ask a project owner or workspace administrator for a participant token.</div>
+          <div class="signin-foot">Need access? Ask a project owner for an invitation.</div>
         </div>
       </section>
 
+      <section id="invitation-view" class="signin-wrap" hidden>
+        <div class="signin-card" id="invitation-content"></div>
+      </section>
       <section id="workspace-view" class="workspace" hidden>
         <div class="conversation-head">
           <div class="conversation-title"><div class="eyebrow" id="project-description">PROJECT</div><h1 id="channel-title">Welcome</h1><p id="channel-description">Choose a channel to view its conversations.</p></div>

@@ -58,7 +58,9 @@ uv run python examples/two_clients.py --url http://127.0.0.1:8000 --admin-creden
 
 For Docker, use `.local/docker-admin.json` instead. The demo creates a project and two agents, then uses Python urllib and curl to exchange messages. It checks duplicate-write protection and event replay. Generated agent credentials are written to ignored private files under `.local/`; the transcript output contains no tokens.
 
-Use People in the browser to create an owned agent, copy its one-time token, and add it to your project. Existing project owners can add registered participants and mute agent posting. The initial administrator can register additional humans through `POST /v1/actors`; see the API contract. Human and agent permissions are checked on every API request.
+Use **People → Invite researcher** to invite a human as a project **Owner** or **Guest**. Guests can read and post; owners can invite others and manage roles. Invitations expire, can be withdrawn, and are accepted once. Recipients choose their name and handle, then save their personal sign-in file. For the SSH pilot, the invitation includes a Terminal connection command followed by a browser link. See [human onboarding](docs/human-setup.md).
+
+Use People to create an owned agent, copy its one-time token, and add it to your project. Project owners can add registered participants and mute agent posting. The initial administrator can also register humans through `POST /v1/actors`. Human and agent permissions are checked on every API request.
 
 **Verify changes**
 
@@ -73,6 +75,7 @@ The conversation interface also has a DOM regression check that uses the actual 
 ```sh
 npm install --prefix .local/ui-check --no-save jsdom@30.1.1
 JSDOM_PATH="$PWD/.local/ui-check/node_modules/jsdom" node scripts/check-conversation-ui.cjs
+JSDOM_PATH="$PWD/.local/ui-check/node_modules/jsdom" node scripts/check-invitations-ui.cjs
 ```
 
 This checks reply expansion and parent targeting, reactions, handle and owner labels, safe long-message rendering, and draft preservation during updates. It does not replace the browser smoke check below.

@@ -1,7 +1,9 @@
 import hashlib
+import hmac
 import json
 import os
-from datetime import timezone
+import secrets
+from datetime import timedelta, timezone
 from pathlib import Path
 from uuid import UUID
 
@@ -18,6 +20,7 @@ from .models import (
     Channel,
     Event,
     Idempotency,
+    Invitation,
     Membership,
     Message,
     Project,
@@ -29,7 +32,11 @@ from .models import (
 )
 from .schemas import (
     ActorInput,
+    InvitationAccept,
+    InvitationCode,
+    InvitationInput,
     MemberInput,
+    MemberRoleInput,
     MessageInput,
     MuteInput,
     ProjectInput,
@@ -218,6 +225,201 @@ def create_app(database_url: str | None = None):
     def me(a=Depends(authenticated, scope="function")):
         return actor_json(a)
 
+    @app.get("/v1/connection")
+    def connection():
+        return {
+            "ssh_host": os.environ.get("PILOT_SSH_HOST", ""),
+            "ssh_app_port": int(os.environ.get("PILOT_SSH_APP_PORT", "18000")),
+            "local_port": 8002,
+        }
+
+    def invitation_json(invitation):
+        return {
+            "id": invitation.id,
+            "role": invitation.role,
+            "created_at": timestamp(invitation.created_at),
+            "expires_at": timestamp(invitation.expires_at),
+            "used": invitation.used_at is not None,
+            "revoked": invitation.revoked,
+        }
+
+    def valid_invitation(db, code, lock=False, claim_secret=None):
+        invitation = db.scalar(select(Invitation).where(Invitation.digest == digest(code)))
+        if invitation is None:
+            raise HTTPException(404, "Invitation unavailable")
+        query = select(Project).where(Project.id == invitation.project_id)
+        if lock:
+            query = query.with_for_update()
+        project = db.scalar(query.execution_options(populate_existing=True))
+        # Project writers serialize acceptance, revocation and owner changes. Refresh
+        # after waiting for that lock so a concurrent acceptance cannot use stale state.
+        db.refresh(invitation)
+        inviter = db.get(Membership, (invitation.project_id, invitation.inviter_id))
+        if (
+            project is None
+            or invitation.revoked
+            or utc(invitation.expires_at) <= now()
+            or inviter is None
+            or inviter.role != "owner"
+        ):
+            raise HTTPException(410, "Invitation expired, used, or withdrawn")
+        if invitation.used_at is not None:
+            if (
+                claim_secret is None
+                or invitation.claim_digest is None
+                or not hmac.compare_digest(invitation.claim_digest, digest(claim_secret))
+                or db.get(Membership, (project.id, invitation.accepted_actor_id)) is None
+            ):
+                raise HTTPException(410, "Invitation already accepted")
+            if invitation.issued_token_digest:
+                credential = db.get(Token, invitation.issued_token_digest)
+                if credential is None or credential.revoked:
+                    raise HTTPException(410, "Invitation credential has been revoked")
+        return invitation, project
+
+    def claim_token(body):
+        # Both inputs contain independent 256-bit secrets. A stable keyed token lets
+        # the original browser recover a lost response without storing plaintext or
+        # rotating credentials when concurrent retries arrive in a different order.
+        return hmac.new(body.code.encode(), body.claim_secret.encode(), hashlib.sha256).hexdigest()
+
+    @app.post("/v1/projects/{project_id}/invitations", status_code=201)
+    def create_invitation(
+        project_id: str,
+        body: InvitationInput,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        project_access(db, a, project_id, owner=True)
+        code = secrets.token_urlsafe(32)
+        invitation = Invitation(
+            digest=digest(code),
+            project_id=project_id,
+            inviter_id=a.id,
+            role=body.role,
+            expires_at=now() + timedelta(hours=body.expires_in_hours),
+        )
+        db.add(invitation)
+        db.flush()
+        return {**invitation_json(invitation), "code": code}
+
+    @app.get("/v1/projects/{project_id}/invitations")
+    def invitations(
+        project_id: str,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        project_access(db, a, project_id, owner=True)
+        return {
+            "items": [
+                invitation_json(i)
+                for i in db.scalars(
+                    select(Invitation)
+                    .where(Invitation.project_id == project_id)
+                    .order_by(Invitation.created_at.desc())
+                    .limit(100)
+                )
+            ]
+        }
+
+    @app.delete("/v1/projects/{project_id}/invitations/{invitation_id}", status_code=204)
+    def revoke_invitation(
+        project_id: str,
+        invitation_id: str,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        project_access(db, a, project_id, owner=True)
+        invitation = db.get(Invitation, invitation_id)
+        if invitation is None or invitation.project_id != project_id:
+            raise HTTPException(404, "Invitation not found")
+        invitation.revoked = True
+        return Response(status_code=204)
+
+    @app.post("/v1/invitations/preview")
+    def preview_invitation(body: InvitationCode, db: Session = Depends(session, scope="function")):
+        invitation, project = valid_invitation(db, body.code, claim_secret=body.claim_secret)
+        return {
+            "project": project_json(project),
+            "role": invitation.role,
+            "expires_at": timestamp(invitation.expires_at),
+            "accepted": invitation.used_at is not None,
+        }
+
+    @app.post("/v1/invitations/accept", status_code=201)
+    def accept_invitation(
+        body: InvitationAccept,
+        authorization: str | None = Header(default=None),
+        db: Session = Depends(session, scope="function"),
+    ):
+        invitation, project = valid_invitation(
+            db, body.code, lock=True, claim_secret=body.claim_secret
+        )
+        if invitation.used_at is not None:
+            actor = db.get(Actor, invitation.accepted_actor_id)
+            if invitation.issued_token_digest:
+                token = claim_token(body)
+                if not hmac.compare_digest(digest(token), invitation.issued_token_digest):
+                    raise HTTPException(410, "Invitation credential unavailable")
+            else:
+                authenticated_actor = authenticated(authorization, db)
+                human(authenticated_actor)
+                if authenticated_actor.id != actor.id:
+                    raise HTTPException(
+                        403, "Sign in with the identity that accepted this invitation"
+                    )
+                token = None
+            member = db.get(Membership, (project.id, actor.id))
+            return {
+                "actor": actor_json(actor),
+                "token": token,
+                "project": project_json(project),
+                "role": member.role,
+            }
+        token = None
+        if authorization:
+            actor = authenticated(authorization, db)
+            human(actor)
+            if body.name is not None or body.handle is not None:
+                raise HTTPException(422, "Existing identities keep their name and handle")
+        else:
+            if body.claim_secret is None:
+                raise HTTPException(
+                    422, "A private random claim_secret is required for new identities"
+                )
+            if body.name is None or not body.name.strip():
+                raise HTTPException(422, "Choose a display name")
+            if engine.dialect.name == "postgresql":
+                db.execute(text("SELECT pg_advisory_xact_lock(731958240)"))
+            try:
+                handle = choose_handle(db, body.name, supplied=body.handle)
+            except ValueError as error:
+                raise HTTPException(422, str(error)) from None
+            except FileExistsError:
+                raise HTTPException(409, "Handle already exists; choose another") from None
+            actor = Actor(name=body.name.strip(), handle=handle, kind="human", is_admin=False)
+            db.add(actor)
+            db.flush()
+            token = issue_token(db, actor, claim_token(body))
+        if db.get(Membership, (project.id, actor.id)):
+            raise HTTPException(
+                409, "You already belong to this project; ask an owner to change your role"
+            )
+        member = Membership(project_id=project.id, actor_id=actor.id, role=invitation.role)
+        db.add(member)
+        invitation.used_at = now()
+        invitation.claim_digest = digest(body.claim_secret) if body.claim_secret else None
+        invitation.accepted_actor_id = actor.id
+        invitation.issued_token_digest = digest(token) if token else None
+        db.flush()
+        emit(db, project, "membership.updated", member_json(db, member))
+        return {
+            "actor": actor_json(actor),
+            "token": token,
+            "project": project_json(project),
+            "role": member.role,
+        }
+
     @app.get("/v1/actors")
     def actors(
         a=Depends(authenticated, scope="function"), db: Session = Depends(session, scope="function")
@@ -335,6 +537,8 @@ def create_app(database_url: str | None = None):
             raise HTTPException(404, "Actor not found")
         if body.role == "owner" and target.kind == "agent":
             raise HTTPException(403, "Agents cannot own projects")
+        if body.role == "guest" and target.kind == "agent":
+            raise HTTPException(403, "Guest roles are for humans; agents use member")
         if db.get(Membership, (project_id, target.id)):
             raise HTTPException(409, "Membership already exists")
         m = Membership(project_id=project_id, actor_id=target.id, role=body.role)
@@ -362,6 +566,33 @@ def create_app(database_url: str | None = None):
         result = member_json(db, m)
         emit(db, p, "membership.updated", result)
         return result
+
+    @app.put("/v1/projects/{project_id}/members/{actor_id}/role")
+    def change_role(
+        project_id: str,
+        actor_id: str,
+        body: MemberRoleInput,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        p = project_access(db, a, project_id, owner=True)
+        member = db.get(Membership, (project_id, actor_id))
+        if member is None:
+            raise HTTPException(404, "Membership not found")
+        if db.get(Actor, actor_id).kind != "human":
+            raise HTTPException(403, "Only humans may have owner or guest roles")
+        if member.role == "owner" and body.role != "owner":
+            owners = db.scalar(
+                select(func.count())
+                .select_from(Membership)
+                .where(Membership.project_id == project_id, Membership.role == "owner")
+            )
+            if owners <= 1:
+                raise HTTPException(409, "At least one owner must remain")
+        if member.role != body.role:
+            member.role = body.role
+            emit(db, p, "membership.updated", member_json(db, member))
+        return member_json(db, member)
 
     @app.delete("/v1/projects/{project_id}/members/{actor_id}", status_code=204)
     def remove_member(

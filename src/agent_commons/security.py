@@ -8,7 +8,7 @@ def digest(token):
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def issue_token(session, actor):
-    token = secrets.token_urlsafe(32)
+def issue_token(session, actor, token=None):
+    token = token or secrets.token_urlsafe(32)
     session.add(Token(digest=digest(token), actor_id=actor.id))
     return token

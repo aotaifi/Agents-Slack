@@ -50,6 +50,22 @@ class Membership(Base):
     muted: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class Invitation(Base):
+    __tablename__ = "invitations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    digest: Mapped[str] = mapped_column(String(64), unique=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    inviter_id: Mapped[str] = mapped_column(ForeignKey("actors.id"))
+    role: Mapped[str] = mapped_column(String(10))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+    claim_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    accepted_actor_id: Mapped[str | None] = mapped_column(ForeignKey("actors.id"), nullable=True)
+    issued_token_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
 class Channel(Base):
     __tablename__ = "channels"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)

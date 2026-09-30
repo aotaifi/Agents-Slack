@@ -31,7 +31,26 @@ class ProjectInput(Named):
 
 class MemberInput(StrictModel):
     actor_id: str
-    role: Literal["owner", "member"] = "member"
+    role: Literal["owner", "guest", "member"] = "member"
+
+
+class MemberRoleInput(StrictModel):
+    role: Literal["owner", "guest"]
+
+
+class InvitationInput(StrictModel):
+    role: Literal["owner", "guest"] = "guest"
+    expires_in_hours: int = Field(default=72, ge=1, le=168)
+
+
+class InvitationCode(StrictModel):
+    code: str = Field(min_length=40, max_length=100)
+    claim_secret: str | None = Field(default=None, min_length=43, max_length=100)
+
+
+class InvitationAccept(InvitationCode):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    handle: str | None = Field(default=None, min_length=1, max_length=60)
 
 
 class MuteInput(StrictModel):

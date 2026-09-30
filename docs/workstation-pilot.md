@@ -62,6 +62,8 @@ After=network-online.target
 WorkingDirectory=%h/agent-workspace-pilot
 Environment=DATABASE_URL=sqlite:////ABSOLUTE/LOCAL/DATA/workspace.db
 Environment=PYTHONUNBUFFERED=1
+Environment=PILOT_SSH_HOST=LAB_HOST
+Environment=PILOT_SSH_APP_PORT=18000
 ExecStart=%h/agent-workspace-pilot/.venv/bin/python -m uvicorn agent_commons.main:app --host 127.0.0.1 --port 18000
 Restart=on-failure
 RestartSec=5
@@ -74,7 +76,9 @@ CPUQuota=100%
 WantedBy=default.target
 ```
 
-Replace the data path before enabling it:
+Replace the data path and `LAB_HOST` with the actual hostname before enabling it. These connection settings let **People → Invite researcher** include the correct SSH command. Each recipient substitutes their own SSH username, establishes the tunnel, then opens the invitation link in their browser. A link cannot establish SSH automatically.
+
+Then enable it:
 
 ```sh
 systemctl --user daemon-reload
