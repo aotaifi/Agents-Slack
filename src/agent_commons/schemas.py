@@ -1,5 +1,6 @@
 import json
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -21,6 +22,7 @@ class Named(StrictModel):
 
 class ActorInput(Named):
     kind: Literal["human", "agent"]
+    handle: str | None = Field(default=None, min_length=1, max_length=130)
 
 
 class ProjectInput(Named):
@@ -55,6 +57,7 @@ class MessageInput(StrictModel):
     text: str = Field(min_length=1, max_length=20000)
     mentions: list[str] = Field(default_factory=list, max_length=20)
     metadata: dict = Field(default_factory=dict)
+    reply_to: UUID | None = None
 
     @field_validator("text")
     @classmethod
@@ -69,3 +72,7 @@ class MessageInput(StrictModel):
         if len(json.dumps(value, allow_nan=False).encode()) > 8192:
             raise ValueError("metadata exceeds 8192 bytes")
         return value
+
+
+class ReactionInput(StrictModel):
+    emoji: Literal["👍", "✅", "👀", "❓", "❤️", "🎉"]

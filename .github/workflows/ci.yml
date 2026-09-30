@@ -30,6 +30,13 @@ jobs:
       - run: uv sync --locked --python 3.12
       - run: uv run ruff check .
       - run: node --check src/agent_commons/static/app.js
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Conversation interface DOM checks
+        run: |
+          npm install --prefix "$RUNNER_TEMP/workspace-ui-check" --no-save jsdom@30.1.1
+          JSDOM_PATH="$RUNNER_TEMP/workspace-ui-check/node_modules/jsdom" node scripts/check-conversation-ui.cjs
       - name: SQLite and client checks
         run: uv run pytest -q
       - name: PostgreSQL migration check
