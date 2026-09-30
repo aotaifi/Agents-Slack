@@ -43,6 +43,7 @@
     return data;
   }
   function signOut(message = '', discardRecovery = true) {
+    $('#edit-project').hidden = true; $('#edit-channel').hidden = true;
     if (discardRecovery) { recoveryGeneration++; sessionStorage.removeItem('workspace_invitation'); sessionStorage.removeItem('workspace_invitation_claims'); renderCredentialRecovery(); }
     $('#invitation-view').hidden = true;
     $('#new-project').disabled = true; state.authGeneration++; state.projectGeneration++; state.navigationGeneration++; stopPolling(); if (ui.modal.open) ui.modal.close(); $('#token-input').value = ''; ui.input.value = ''; state.pendingPost = null; state.pendingMentions.clear(); state.replyTo = null; state.projects = []; state.channels = []; state.threads = []; state.members = []; state.actors = []; state.messages = []; state.messageCursor = 0; state.eventCursor = 0; state.token = ''; state.me = null; sessionStorage.removeItem('commons_token'); state.project = null; state.channel = null; state.thread = null;
@@ -85,6 +86,8 @@
           if (event.id <= state.eventCursor) continue;
           if (['message.created', 'reaction.added', 'reaction.removed'].includes(event.type) && event.thread_id) changedThreads.add(event.thread_id);
           if (event.type === 'rules.updated') $('#rules-open').classList.add('has-update');
+          if (event.type === 'project.updated') await loadProjects();
+          if (event.type === 'channel.updated') await loadChannels();
           if (event.type.startsWith('membership.')) { await loadMembers(); }
           if (event.type === 'channel.created' || event.type === 'thread.created') {
             await loadChannels(); if (state.channel) await loadThreads();
@@ -120,19 +123,22 @@
   }
   async function selectProject(project) {
     if (state.project?.id !== project.id) { state.channel = null; state.thread = null; state.messages = []; state.eventCursor = 0; }
-    state.projectGeneration++; stopPolling(); state.pollBusy = false; state.navigationGeneration++; state.project = project; state.channel = null; state.thread = null; state.channels = []; ui.channels.replaceChildren(); renderProjects(); renderProjectHeader();
+    state.projectGeneration++; stopPolling(); state.pollBusy = false; state.navigationGeneration++; state.project = project; state.channel = null; state.thread = null; state.channels = []; state.members = []; ui.channels.replaceChildren(); renderProjects(); renderProjectHeader(); updateNameControls();
     $('#new-channel').disabled = false; $('#members-open').disabled = false; $('#rules-open').disabled = false;
     ui.channelCrumb.textContent = 'Choose a channel'; ui.channelTitle.textContent = 'Project overview'; ui.channelDescription.textContent = project.description || 'Choose a channel to view its conversations.'; ui.projectDescription.textContent = project.name.toUpperCase();
     clearSelection();
     const generation = state.projectGeneration; try { await Promise.all([loadChannels(), loadMembers(), loadActors()]); if (generation !== state.projectGeneration || state.project?.id !== project.id) return; let after = 0; let snapshot = 0; let page; do { page = await api(`/projects/${encodeURIComponent(project.id)}/events?after=${after}&limit=100`); if (generation !== state.projectGeneration || state.project?.id !== project.id) return; snapshot = page.cursor ?? snapshot; const next = page.next_cursor; if (next === after) break; after = next; } while (after !== null && after !== undefined); state.eventCursor = snapshot; startPolling(); }
     catch (e) { if (e.message !== 'Authentication required') showError(e.message); }
   }
-  function renderProjectHeader() { ui.projectCrumb.textContent = state.project?.name || 'Your workspace'; }
+  function renderProjectHeader() { ui.projectCrumb.textContent = state.project?.name || 'Your workspace'; if (state.project) ui.projectDescription.textContent = state.project.name.toUpperCase(); }
+  function renderChannelHeader() { if (!state.channel) return; ui.channelCrumb.textContent = state.channel.name; ui.channelTitle.textContent = state.channel.name; ui.channelDescription.textContent = state.channel.description || 'Conversations in this channel'; }
+  function updateNameControls() { const allowed = !!state.project && state.me?.kind === 'human' && isOwner(); $('#edit-project').hidden = !allowed; $('#edit-channel').hidden = !allowed || !state.channel; }
   function clearSelection() { ui.threadBar.hidden = true; ui.messagesPanel.hidden = true; ui.welcome.hidden = false; $('#welcome-thread').hidden = !state.channel; }
   async function loadChannels() {
     if (!state.project) return; const projectId = state.project.id; const generation = state.projectGeneration;
     const data = await api(`/projects/${encodeURIComponent(projectId)}/channels`); if (generation !== state.projectGeneration || state.project?.id !== projectId) return; state.channels = data.items || []; renderChannels();
-    if (state.channel) { const fresh = state.channels.find(c => c.id === state.channel.id); if (!fresh) { state.channel = null; state.thread = null; clearSelection(); } }
+    if (state.channel) { const fresh = state.channels.find(c => c.id === state.channel.id); if (!fresh) { state.channel = null; state.thread = null; clearSelection(); } else { state.channel = fresh; renderChannelHeader(); } }
+    updateNameControls();
   }
   function renderChannels() {
     ui.channels.replaceChildren();
@@ -143,7 +149,7 @@
     }
   }
   async function selectChannel(channel) {
-    state.navigationGeneration++; state.channel = channel; state.thread = null; renderChannels(); ui.channelCrumb.textContent = channel.name; ui.channelTitle.textContent = channel.name; ui.channelDescription.textContent = channel.description || 'Conversations in this channel';
+    state.navigationGeneration++; state.channel = channel; state.thread = null; renderChannels(); renderChannelHeader(); updateNameControls();
     $('#new-thread').hidden = false; $('#welcome-thread').hidden = false; ui.threadBar.hidden = true; ui.messagesPanel.hidden = true; ui.welcome.hidden = false;
     try { await loadThreads(); if (state.threads.length) await selectThread(state.threads[0]); }
     catch (e) { showError(e.message); }
@@ -290,7 +296,7 @@
     } catch (e) { $('#composer-error').textContent = e.message; }
     finally { state.busy = false; button.disabled = false; }
   }
-  async function loadMembers() { if (!state.project) return; const projectId = state.project.id; const generation = state.projectGeneration; const data = await api(`/projects/${encodeURIComponent(projectId)}/members`); if (generation === state.projectGeneration && state.project?.id === projectId) state.members = data.items || []; }
+  async function loadMembers() { if (!state.project) return; const projectId = state.project.id; const generation = state.projectGeneration; const data = await api(`/projects/${encodeURIComponent(projectId)}/members`); if (generation === state.projectGeneration && state.project?.id === projectId) { state.members = data.items || []; updateNameControls(); } }
   async function loadActors() { const generation = state.authGeneration; try { const d = await api('/actors'); if (generation === state.authGeneration) state.actors = d.items || []; } catch { if (generation === state.authGeneration) state.actors = []; } }
   function isOwner() { return state.members.some(m => m.actor.id === state.me?.id && m.role === 'owner'); }
   function openModal(title, kicker, content) { ui.modalTitle.textContent = title; ui.modalKicker.textContent = kicker; ui.modalContent.replaceChildren(); ui.modalContent.append(content); if (!ui.modal.open) ui.modal.showModal(); }
@@ -304,6 +310,18 @@
     const authGeneration = state.authGeneration; const name = formField('Project name', 'name', 'text', 'e.g. Alpine lake monitoring'); const description = formField('Description (optional)', 'description', 'textarea', 'What is this project investigating?'); description.input.required = false;
     createForm('Create a project', 'PROJECTS', [name, description], 'Create project', async ([n, d]) => { const p = await api('/projects', { method: 'POST', body: { name: n.trim(), description: d.trim() } }); if (authGeneration !== state.authGeneration) return; state.projects.push(p); await selectProject(p); renderProjects(); });
   });
+  function editName(kind) {
+    const item = kind === 'project' ? state.project : state.channel; if (!item || !isOwner() || state.me?.kind !== 'human') return;
+    const authGeneration = state.authGeneration; const projectGeneration = state.projectGeneration;
+    const name = formField(`${kind === 'project' ? 'Project' : 'Channel'} name`, 'name'); name.input.value = item.name; name.input.maxLength = 200;
+    createForm(`Edit ${kind} name`, state.project.name.toUpperCase(), [name], 'Save name', async ([value]) => {
+      await api(`/${kind === 'project' ? 'projects' : 'channels'}/${encodeURIComponent(item.id)}`, { method: 'PATCH', body: { name: value.trim() } });
+      if (authGeneration !== state.authGeneration || projectGeneration !== state.projectGeneration) return;
+      if (kind === 'project') await loadProjects(); else await loadChannels();
+    });
+  }
+  $('#edit-project').addEventListener('click', () => editName('project'));
+  $('#edit-channel').addEventListener('click', () => editName('channel'));
   $('#new-channel').addEventListener('click', () => {
     if (!state.project) return; const authGeneration = state.authGeneration; const projectId = state.project.id; const name = formField('Channel name', 'name', 'text', 'e.g. field-notes'); const description = formField('Description (optional)', 'description', 'textarea', 'What belongs in this channel?'); description.input.required = false;
     createForm('Create a channel', state.project.name.toUpperCase(), [name, description], 'Create channel', async ([n, d]) => { const channel = await api(`/projects/${encodeURIComponent(projectId)}/channels`, { method: 'POST', body: { name: n.trim(), description: d.trim() } }); if (authGeneration !== state.authGeneration || state.project?.id !== projectId) return; await loadChannels(); await selectChannel(channel); });

@@ -39,6 +39,7 @@ from .schemas import (
     MemberRoleInput,
     MessageInput,
     MuteInput,
+    Named,
     ProjectInput,
     ReactionInput,
     RulesInput,
@@ -506,6 +507,19 @@ def create_app(database_url: str | None = None):
     ):
         return project_json(project_access(db, a, project_id))
 
+    @app.patch("/v1/projects/{project_id}")
+    def rename_project(
+        project_id: str,
+        body: Named,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        p = project_access(db, a, project_id, owner=True)
+        if p.name != body.name:
+            p.name = body.name
+            emit(db, p, "project.updated", project_json(p))
+        return project_json(p)
+
     @app.get("/v1/projects/{project_id}/members")
     def members(
         project_id: str,
@@ -671,6 +685,23 @@ def create_app(database_url: str | None = None):
         result = channel_json(c)
         emit(db, p, "channel.created", result)
         return result
+
+    @app.patch("/v1/channels/{channel_id}")
+    def rename_channel(
+        channel_id: str,
+        body: Named,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        channel = db.get(Channel, channel_id)
+        if channel is None:
+            raise HTTPException(404, "Channel not found")
+        p = project_access(db, a, channel.project_id, owner=True)
+        db.refresh(channel)
+        if channel.name != body.name:
+            channel.name = body.name
+            emit(db, p, "channel.updated", channel_json(channel))
+        return channel_json(channel)
 
     @app.get("/v1/channels/{channel_id}/threads")
     def threads(
