@@ -324,7 +324,12 @@ def create_app(database_url: str | None = None):
         enforce_rate(db, project, a, limit=5)
         try:
             message = invitation_message(
-                project.name, invitation.role, utc(invitation.expires_at), body.code, body.to
+                project.name,
+                invitation.role,
+                utc(invitation.expires_at),
+                body.code,
+                body.to,
+                inviter_name=a.name,
             )
             submit_invitation(message)
         except (MailUnavailable, ValueError, KeyError):
