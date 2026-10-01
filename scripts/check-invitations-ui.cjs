@@ -16,7 +16,7 @@ const code = 'c'.repeat(43);
 const invitation = { id: 'invite', code, role: 'guest', used: false, revoked: false, expires_at: '2099-01-01T00:00:00Z' };
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 async function flush() { for (let i = 0; i < 10; i++) await tick(); }
-function setup(url = 'http://127.0.0.1:8000/', token = '') {
+function setup(url = 'http://127.0.0.1:8000/', token = '', emailEnabled = true) {
   const dom = new JSDOM(html, { url, runScripts: 'outside-only', pretendToBeVisual: true });
   const w = dom.window; w.Headers = Headers; w.crypto.randomUUID = require('node:crypto').randomUUID;
   w.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
@@ -28,7 +28,7 @@ function setup(url = 'http://127.0.0.1:8000/', token = '') {
     const body = options.body ? JSON.parse(options.body) : undefined;
     requests.push({ url, method: options.method || 'GET', body, headers: options.headers });
     let data;
-    if (url === '/v1/connection') data = { ssh_host: 'lab.example.test', ssh_app_port: 18000, local_port: 8002 };
+    if (url === '/v1/connection') data = { ssh_host: 'lab.example.test', ssh_app_port: 18000, local_port: 8002, email_enabled: emailEnabled };
     else if (url === '/v1/invitations/preview') data = { project, role: 'guest', expires_at: invitation.expires_at };
     else if (url === '/v1/invitations/accept') { signedIn = guest; members.push({ actor: guest, role: 'guest' }); data = { actor: guest, token: token ? null : 'guest-token', project, role: 'guest' }; }
     else if (url === '/v1/me') data = signedIn;
@@ -51,6 +51,7 @@ function setup(url = 'http://127.0.0.1:8000/', token = '') {
   assert.ok(inviteButton);
   inviteButton.click(); await flush();
   const role = w.document.querySelector('[aria-label="Invitation role"]'); assert.equal(role.value, 'guest');
+  const recipient = w.document.querySelector('[name=email]'); assert.equal(recipient.required, false); recipient.value = 'alex+lab@example.test';
   role.value = 'owner';
   w.document.querySelector('#modal-content form').dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true })); await flush();
   const created = requests.find(r => r.method === 'POST' && r.url.endsWith('/invitations'));
@@ -59,6 +60,32 @@ function setup(url = 'http://127.0.0.1:8000/', token = '') {
   assert.match(instructions, /YOUR_UNIVERSITY_USERNAME@lab\.example\.test/);
   assert.match(instructions, /127\.0\.0\.1:8002:127\.0\.0\.1:18000/);
   assert.match(instructions, new RegExp(`http://127\\.0\\.0\\.1:8002/#invite=${code}`));
+  assert.match(instructions, /Accept invitation/); assert.match(instructions, /Save my sign-in file/); assert.match(instructions, /Create an agent/);
+  const draft = w.document.querySelector('a[href^="mailto:"]'); const draftUrl = new URL(draft.href);
+  assert.equal(decodeURIComponent(draftUrl.pathname), 'alex+lab@example.test');
+  assert.equal(draftUrl.searchParams.get('body').replace(/\r\n/g, '\n'), instructions);
+  assert.ok(draftUrl.searchParams.get('subject').includes(project.name));
+  assert.equal(w.document.querySelector('[name=recipient]').value, 'alex+lab@example.test');
+  const mailForm = w.document.querySelector('#modal-content form');
+  const normalFetch = w.fetch; let failEmail = true;
+  w.fetch = (url, options) => url.endsWith('/email') && failEmail
+    ? Promise.resolve({ status: 502, ok: false, json: async () => ({ detail: 'Email submission could not be confirmed.' }) }) : normalFetch(url, options);
+  mailForm.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true })); await flush();
+  assert.match(mailForm.querySelector('[role=status]').textContent, /could not be confirmed/);
+  assert.equal(mailForm.querySelector('button').disabled, false);
+  assert.equal(w.document.querySelector('[aria-label="Invitation and connection instructions"]').value, instructions);
+  w.fetch = (url, options) => url.endsWith('/email') ? Promise.reject(new Error('Connection lost after SMTP acceptance')) : normalFetch(url, options);
+  mailForm.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true })); await flush();
+  assert.match(mailForm.querySelector('[role=status]').textContent, /may have been sent/);
+  assert.match(mailForm.querySelector('[role=status]').textContent, /Check before retrying/);
+  assert.equal(w.document.querySelector('[aria-label="Invitation and connection instructions"]').value, instructions);
+  w.fetch = normalFetch;
+  failEmail = false;
+  mailForm.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true })); await flush();
+  const emailed = requests.find(r => r.url.endsWith('/email'));
+  assert.deepEqual(emailed.body, { code, to: 'alex+lab@example.test' });
+  assert.match(mailForm.querySelector('[role=status]').textContent, /Inbox delivery is not yet confirmed/);
+  assert.equal(mailForm.querySelector('button').disabled, true);
   assert.ok(!requests.some(r => r.url.includes(code)), 'secret never placed in API URL');
   await api.showMembers();
   const picker = w.document.querySelector('[aria-label="Role for Owner"]'); picker.value = 'guest';
@@ -68,6 +95,18 @@ function setup(url = 'http://127.0.0.1:8000/', token = '') {
   assert.ok(![...w.document.querySelectorAll('button')].some(b => b.textContent === 'Invite researcher'));
   assert.equal(w.document.querySelectorAll('[aria-label^="Role for"]').length, 0);
   admin.dom.window.close();
+
+  const disabledMail = setup('https://workspace.example.test/', '', false);
+  disabledMail.w.__invitationTest.state.me = owner; disabledMail.w.__invitationTest.state.token = 'owner-token'; disabledMail.w.__invitationTest.state.project = project;
+  await disabledMail.w.__invitationTest.createInvitation(project.id);
+  disabledMail.w.document.querySelector('#modal-content form').dispatchEvent(new disabledMail.w.Event('submit', { bubbles: true, cancelable: true })); await flush();
+  assert.equal(disabledMail.w.document.querySelector('[name=recipient]'), null);
+  const publicInstructions = disabledMail.w.document.querySelector('[aria-label="Invitation and connection instructions"]').value;
+  assert.ok(publicInstructions.includes(`https://workspace.example.test/#invite=${code}`));
+  assert.ok(!publicInstructions.includes('ssh -N'));
+  assert.equal(disabledMail.w.document.querySelector('a[href^="mailto:"]').getAttribute('href').startsWith('mailto:?subject='), true);
+  assert.ok(disabledMail.w.document.querySelector('#modal-content').textContent.includes('Server email is not configured'));
+  disabledMail.dom.window.close();
 
   const joining = setup(`http://127.0.0.1:8002/#invite=${code}`); await flush();
   assert.equal(joining.w.location.hash, '', 'remove invitation from address bar/history');

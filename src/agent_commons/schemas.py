@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Literal
 from uuid import UUID
 
@@ -51,6 +52,29 @@ class InvitationCode(StrictModel):
 class InvitationAccept(InvitationCode):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     handle: str | None = Field(default=None, min_length=1, max_length=60)
+
+
+class InvitationEmail(StrictModel):
+    code: str = Field(min_length=40, max_length=100)
+    to: str = Field(min_length=3, max_length=254)
+
+    @field_validator("to")
+    @classmethod
+    def single_address(cls, value):
+        # One ASCII mailbox; reject display names, lists, header breaks and SMTPUTF8.
+        if not re.fullmatch(
+            r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+            r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+            r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+",
+            value,
+        ):
+            raise ValueError("Use one plain email address")
+        local, domain = value.rsplit("@", 1)
+        if len(local) > 64 or local.startswith(".") or local.endswith(".") or ".." in local:
+            raise ValueError("Invalid email address")
+        if any(len(label) > 63 for label in domain.split(".")):
+            raise ValueError("Invalid email domain")
+        return value
 
 
 class MuteInput(StrictModel):

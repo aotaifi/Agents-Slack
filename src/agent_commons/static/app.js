@@ -387,21 +387,51 @@
     return select;
   }
   async function createInvitation(projectId) {
-    const authGeneration = state.authGeneration; let connection;
+    const authGeneration = state.authGeneration; const projectName = state.project.name; let connection;
     try { connection = await api('/connection', { anonymous: true }); } catch (e) { showError(e.message); return; }
     if (state.project?.id !== projectId || state.authGeneration !== authGeneration) return;
     const role = rolePicker('Invitation role'); const roleLabel = document.createElement('label'); roleLabel.textContent = 'Project role'; roleLabel.append(role);
+    const email = formField('Researcher email (optional)', 'email', 'email', 'colleague@university.edu'); email.input.required = false; email.input.maxLength = 254;
     const expiry = formField('Expires after (hours)', 'expiry', 'number'); expiry.input.min = '1'; expiry.input.max = '168'; expiry.input.value = '72';
-    createForm('Invite researcher', state.project.name.toUpperCase(), [{ label: roleLabel, input: role }, expiry], 'Create invitation', async ([selectedRole, hours]) => {
+    createForm('Invite researcher', projectName.toUpperCase(), [email, { label: roleLabel, input: role }, expiry], 'Create invitation', async ([recipient, selectedRole, hours]) => {
       const result = await api(`/projects/${encodeURIComponent(projectId)}/invitations`, { method: 'POST', body: { role: selectedRole, expires_in_hours: Number(hours) } });
       if (state.project?.id !== projectId || state.authGeneration !== authGeneration) return;
       const link = new URL('/', location.origin); const local = ['127.0.0.1', 'localhost', '[::1]'].includes(link.hostname); if (local) link.port = String(connection.local_port); link.hash = new URLSearchParams({ invite: result.code }).toString();
       const host = /^[a-zA-Z0-9][a-zA-Z0-9.-]*$/.test(connection.ssh_host) ? connection.ssh_host : 'LAB_HOST';
-      const instructions = `${local ? `1. In Terminal, connect using your own university SSH account and keep the connection open:\nssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:${connection.local_port}:127.0.0.1:${connection.ssh_app_port} YOUR_UNIVERSITY_USERNAME@${host}\n\n2. Open this invitation in your browser:\n` : 'Open this invitation in your browser:\n'}${link.href}\n\nProject role: ${result.role}. Expires: ${new Date(result.expires_at).toLocaleString()}. This invitation can be used once. Keep it private.`;
+      const nextStep = local ? 3 : 2;
+      const instructions = `You are invited to join ${projectName} in Research Workspace.\n\n${local ? `1. On your own Mac or computer, open Terminal. Replace YOUR_UNIVERSITY_USERNAME with your own university SSH username, run this command, and leave Terminal open:\nssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:${connection.local_port}:127.0.0.1:${connection.ssh_app_port} YOUR_UNIVERSITY_USERNAME@${host}\n\nThe command may stay quiet: that is normal. You need existing SSH access to this workstation; the invitation does not provide a university account.\n\n2. Open this invitation in your browser (Safari, Chrome, or another browser):\n` : '1. Open this invitation in your browser:\n'}${link.href}\n\n${nextStep}. Choose your name and optional handle, click Accept invitation, then Save my sign-in file. If already signed in, accept using your existing human identity.\n\n${nextStep + 1}. To connect your own agent, open People → Create an agent and save its separate one-time token. ${result.role === 'owner' ? 'Then use People → Add participant to add your agent to this project.' : 'Ask a project owner to add your agent to this project.'} Give your agent its own token, the project ID, and the workspace connection instructions.\n\nProject role: ${result.role === 'owner' ? 'Owner — invite and manage' : 'Guest — read and post'}. Expires: ${new Date(result.expires_at).toLocaleString()}. This invitation can be used once. Keep it private.`;
       const wrap = document.createElement('div'); const note = document.createElement('p'); note.className = 'modal-copy'; note.textContent = 'Share these instructions privately. The researcher chooses their own name and handle. Save the link now; it is shown only once.';
       const text = document.createElement('textarea'); text.readOnly = true; text.rows = 10; text.value = instructions; text.setAttribute('aria-label', 'Invitation and connection instructions');
       const copy = document.createElement('button'); copy.type = 'button'; copy.className = 'primary-button'; copy.textContent = 'Copy invitation and SSH steps'; copy.addEventListener('click', async () => { try { await navigator.clipboard.writeText(instructions); copy.textContent = 'Copied'; } catch { text.focus(); text.select(); copy.textContent = 'Select and copy instructions'; } });
-      wrap.append(note, text, copy); openModal('Invitation ready', 'ONE-TIME INVITATION', wrap);
+      const draft = document.createElement('a'); draft.className = 'secondary-button'; draft.textContent = 'Open email draft';
+      const subject = `Invitation to ${projectName.replace(/[\r\n]+/g, ' ')} — Research Workspace`;
+      draft.href = `mailto:${encodeURIComponent(recipient.trim())}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(instructions.replace(/\n/g, '\r\n'))}`;
+      const actions = document.createElement('div'); actions.className = 'modal-actions'; actions.append(copy, draft);
+      wrap.append(note, text);
+      if (connection.email_enabled) {
+        const sendForm = document.createElement('form'); sendForm.className = 'stack-form';
+        const address = formField('Send invitation to', 'recipient', 'email', 'colleague@university.edu'); address.input.value = recipient.trim(); address.input.maxLength = 254;
+        const send = document.createElement('button'); send.type = 'submit'; send.className = 'primary-button'; send.textContent = 'Send invitation email';
+        const status = document.createElement('p'); status.className = 'form-hint'; status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
+        sendForm.append(address.label, send, status);
+        address.input.addEventListener('input', () => { draft.href = `mailto:${encodeURIComponent(address.input.value.trim())}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(instructions.replace(/\n/g, '\r\n'))}`; });
+        sendForm.addEventListener('submit', async event => {
+          event.preventDefault(); if (!address.input.reportValidity() || send.disabled) return;
+          if (state.authGeneration !== authGeneration || state.project?.id !== projectId) return;
+          send.disabled = true; status.textContent = 'Submitting invitation email…';
+          try {
+            await api(`/projects/${encodeURIComponent(projectId)}/invitations/${encodeURIComponent(result.id)}/email`, { method: 'POST', body: { code: result.code, to: address.input.value.trim() } });
+            if (state.authGeneration !== authGeneration || state.project?.id !== projectId) return;
+            status.textContent = 'Submitted to the mail server. Inbox delivery is not yet confirmed.'; send.textContent = 'Email submitted';
+          } catch (error) {
+            if (state.authGeneration !== authGeneration || state.project?.id !== projectId) return;
+            status.textContent = error.status >= 400 && error.status < 500 ? error.message : 'Email submission could not be confirmed. It may have been sent. Check before retrying, or copy the instructions instead.'; send.disabled = false;
+          }
+        });
+        wrap.append(sendForm);
+      }
+      const hint = document.createElement('p'); hint.className = 'form-hint'; hint.textContent = `${connection.email_enabled ? 'Alternatively, ' : 'Server email is not configured. '}Open email draft opens your email app with these steps filled in. Review the email and press Send there. If no email app opens, copy the instructions into your email instead.`;
+      wrap.append(actions, hint); openModal('Invitation ready', 'ONE-TIME INVITATION', wrap);
     });
   }
   function savedClaims() { try { return JSON.parse(sessionStorage.getItem('workspace_invitation_claims') || '{}'); } catch { return {}; } }

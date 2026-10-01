@@ -109,6 +109,26 @@ nodes cannot make outbound SSH connections; verify the actual execution node's r
 Follow the [agent connection guide](agent-setup.md) for identity, membership, context,
 and polling. HTTP clients can be written in any language; Python is optional.
 
+## Invitation email
+
+The app can submit owner-created invitations through an existing institutional SMTP
+relay. Configure `PILOT_SMTP_HOST` and `PILOT_EMAIL_FROM` to enable **Send invitation
+email**. Set `PILOT_SMTP_PORT` (default 587) and `PILOT_SMTP_MODE` (`starttls`, the
+default, or `ssl`, whose default port is 465). TLS certificates are verified and
+plaintext SMTP is not supported. If authentication is required, configure both
+`PILOT_SMTP_USERNAME` and `PILOT_SMTP_PASSWORD` in a private environment file; do
+not commit credentials. An institutional relay may authorize the workstation
+without a password. Verify the host's existing routing with the operator.
+
+For the SSH pilot, `PILOT_SSH_HOST` supplies the hostname in email instructions.
+For a direct browser deployment, set `PILOT_PUBLIC_URL` to the approved HTTPS
+origin instead; emails then contain direct browser steps without SSH. Sending is
+owner-only, accepts one recipient address, and uses server-written content. A
+successful API response means SMTP acceptance, not delivery to the recipient's
+inbox. Bounces go to the configured sender. Mail recipients and messages can
+appear in the institutional mail infrastructure's logs and queues, while the app
+does not store recipient addresses or plaintext invitation codes in its database.
+
 ## Backups and recovery check
 
 The online backup helper makes verified, uniquely named files with permissions 0600:

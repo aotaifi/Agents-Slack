@@ -8,13 +8,14 @@ from pathlib import Path
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session, object_session
 
 from .db import make_engine, session_factory
 from .identity import choose_handle
+from .invitation_email import MailUnavailable, email_enabled, invitation_message, submit_invitation
 from .models import (
     Actor,
     Channel,
@@ -34,6 +35,7 @@ from .schemas import (
     ActorInput,
     InvitationAccept,
     InvitationCode,
+    InvitationEmail,
     InvitationInput,
     MemberInput,
     MemberRoleInput,
@@ -197,7 +199,7 @@ def create_app(database_url: str | None = None):
         db.flush()
         return e
 
-    def enforce_rate(db, p, a):
+    def enforce_rate(db, p, a, limit=None):
         current = now()
         window = db.get(RateWindow, (p.id, a.id))
         if window is None:
@@ -206,7 +208,7 @@ def create_app(database_url: str | None = None):
         elapsed = (current - utc(window.started_at)).total_seconds()
         if elapsed >= 60:
             window.started_at, window.count = current, 0
-        elif window.count >= app.state.posting_limit:
+        elif window.count >= min(app.state.posting_limit, limit or app.state.posting_limit):
             raise HTTPException(
                 429,
                 "Posting rate limit exceeded",
@@ -232,6 +234,7 @@ def create_app(database_url: str | None = None):
             "ssh_host": os.environ.get("PILOT_SSH_HOST", ""),
             "ssh_app_port": int(os.environ.get("PILOT_SSH_APP_PORT", "18000")),
             "local_port": 8002,
+            "email_enabled": email_enabled(),
         }
 
     def invitation_json(invitation):
@@ -303,6 +306,38 @@ def create_app(database_url: str | None = None):
         db.add(invitation)
         db.flush()
         return {**invitation_json(invitation), "code": code}
+
+    @app.post("/v1/projects/{project_id}/invitations/{invitation_id}/email", status_code=202)
+    def email_invitation(
+        project_id: str,
+        invitation_id: str,
+        body: InvitationEmail,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        project = project_access(db, a, project_id, owner=True)
+        invitation, _ = valid_invitation(db, body.code)
+        if invitation.project_id != project_id or invitation.id != invitation_id:
+            raise HTTPException(404, "Invitation not found")
+        if not email_enabled():
+            raise HTTPException(503, "Email sending is not configured; copy the invitation instead")
+        enforce_rate(db, project, a, limit=5)
+        try:
+            message = invitation_message(
+                project.name, invitation.role, utc(invitation.expires_at), body.code, body.to
+            )
+            submit_invitation(message)
+        except (MailUnavailable, ValueError, KeyError):
+            # Return normally so the attempt debit commits even when SMTP delivery
+            # is uncertain. Raising here would roll it back and bypass the limit.
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "detail": "Email submission could not be confirmed. The invitation is still "
+                    "available; check before retrying, or copy the instructions instead."
+                },
+            )
+        return {"status": "submitted"}
 
     @app.get("/v1/projects/{project_id}/invitations")
     def invitations(

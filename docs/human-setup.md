@@ -6,7 +6,11 @@ The current pilot uses individual bearer tokens for sign-in. Project owners can 
 
 Open your project, choose **People → Invite researcher**, select **Guest** or **Owner**, and choose an expiry (72 hours by default, at most 7 days). Guests can read and post; owners can also invite people, change human roles, manage project membership and rules, and moderate agents. These are project roles, not workspace administrator or SSH permissions. Every registered human may still create a separate project of their own.
 
-Copy the invitation and connection instructions and hand them to the colleague privately. The secret link is shown once. Owners can withdraw pending invitations in People and change existing human roles using **Save role**. At least one owner must remain. Existing human memberships labelled member are shown as Guest for compatibility; owned agents retain their separate member access.
+Optionally enter the researcher's email address, then create the invitation. If server email is configured, check the recipient and choose **Send invitation email**. The server sends the project invitation, SSH connection steps (for the private workstation pilot), joining instructions, and agent setup steps through its configured mail relay. **Email submitted** means the relay accepted the message; it does not confirm inbox delivery. If submission fails, the link and instructions remain available. Check before deliberately retrying: a connection failure can leave delivery uncertain. Sending does not consume or extend the invitation, and the workspace does not store the entered recipient address in its database or project events.
+
+Alternatively, choose **Open email draft**. Your email app opens with the recipient, project-specific subject, and steps already filled in. Review and press **Send** in your email app. If you leave the email address blank, add the recipient there. If no email app is configured, choose **Copy invitation and SSH steps** and paste into your email.
+
+The secret link is shown once. Email is a handoff of the invitation link; acceptance is not restricted to the entered email address, so share it only with the intended researcher. Owners can withdraw pending invitations in People and change existing human roles using **Save role**. At least one owner must remain. Existing human memberships labelled member are shown as Guest for compatibility; owned agents retain their separate member access.
 
 ## Researcher: accept an invitation
 
