@@ -8,7 +8,7 @@ from pathlib import Path
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session, object_session
@@ -1060,11 +1060,15 @@ def create_app(database_url: str | None = None):
 
     static = Path(__file__).parent / "static"
     if static.exists():
+        script_version = hashlib.sha256((static / "app.js").read_bytes()).hexdigest()[:12]
         app.mount("/static", StaticFiles(directory=static), name="static")
 
         @app.get("/", include_in_schema=False)
         def index():
-            return FileResponse(static / "index.html")
+            html = (static / "index.html").read_text().replace(
+                'src="/static/app.js"', f'src="/static/app.js?v={script_version}"'
+            )
+            return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
     return app
 

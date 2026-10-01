@@ -388,7 +388,7 @@
   }
   async function createInvitation(projectId) {
     const authGeneration = state.authGeneration; const projectName = state.project.name; const inviterName = state.me.name; let connection;
-    try { connection = await api('/connection', { anonymous: true }); } catch (e) { showError(e.message); return; }
+    try { connection = await api('/connection', { anonymous: true, cache: 'no-store' }); } catch (e) { showError(e.message); return; }
     if (state.project?.id !== projectId || state.authGeneration !== authGeneration) return;
     const role = rolePicker('Invitation role'); const roleLabel = document.createElement('label'); roleLabel.textContent = 'Project role'; roleLabel.append(role);
     const email = formField('Researcher email (optional)', 'email', 'email', 'colleague@university.edu'); email.input.required = false; email.input.maxLength = 254;
