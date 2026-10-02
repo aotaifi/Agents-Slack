@@ -16,7 +16,6 @@ import shlex
 import shutil
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 from agent_commons_client import ApiError
@@ -277,8 +276,17 @@ def connect(args, session_id, cwd, *, tunnels=None, base=None):
         (directory / "settings.json").unlink(missing_ok=True)  # unused by the plugin
         workspace, _ = load(session_id, base=base)
         with workspace.locked():
-            workspace.save(session_id=session_id, last_poll=time.time())
+            workspace.save(session_id=session_id, last_poll=0)
             workspace.claim()
+            if not workspace.state["initialized"]:
+                # Start the inbox here, at connect time. Otherwise the first hook poll only
+                # sets the start point and silently skips mentions posted after connecting.
+                page = workspace.api().request(
+                    "GET",
+                    f"projects/{workspace.config['project_id']}/inbox",
+                    query={"after": 0, "limit": 1},
+                )
+                workspace.save(cursor=page["cursor"], initialized=True)
         meta = {
             "tunnel": {**spec, "local_port": port} if spec else None  # profile flag harmless
         }

@@ -43,6 +43,8 @@ class Stub(BaseHTTPRequestHandler):
 
     def do_GET(self):
         Stub.log.append(("GET", self.path))
+        if "/inbox" in self.path:
+            return self._send({"items": [], "next_cursor": None, "cursor": 7})
         if self.path == "/v1/me":
             return self._send({**CONNECTION["actor"], "kind": Stub.kind, "connection": CONNECTION})
         self._send({}, 404)
@@ -173,7 +175,8 @@ def test_connect_binds_actual_session_privately_without_leaking_token(env, serve
         assert (f.stat().st_mode & 0o777) == 0o600, f
     assert wsplugin.session_hash(SID) in str(d) and SID not in str(d)
     state = adapter.read_private(d / "checkpoint.json")
-    assert state["session_id"] == SID and state["connected"] and state["initialized"] is False
+    assert state["session_id"] == SID and state["connected"]
+    assert state["initialized"] is True and state["cursor"] == 7  # inbox starts at connect
     claims = [e for e in Stub.log if e[0] == "POST" and e[1].endswith("/claim")]
     assert claims[0][2] == {"session_id": SID}
     assert not (d / "settings.json").exists()
@@ -261,11 +264,6 @@ def test_hook_notifies_inbox_reply_roundtrip_via_plugin(env, server):
     wsplugin.connect(
         args(credentials=str(cred), url=server, replay_backlog=True), SID, str(work), base=base
     )
-    assert wsplugin.run_hook(hook_payload(work), transport=fake, base=base) is None  # throttled
-    assert fake.calls == []
-    d = wsplugin.session_dir(SID, base)
-    state = adapter.read_private(d / "checkpoint.json")
-    adapter.write_private(d / "checkpoint.json", {**state, "last_poll": 0})
     out = wsplugin.run_hook(hook_payload(work), transport=fake, base=base)
     text = out["hookSpecificOutput"]["additionalContext"]
     assert "New workspace mention" in text and "ws.py" in text and "--config" not in text
@@ -493,3 +491,15 @@ def test_ssh_account_is_remembered_after_first_tunnel_connect(env, server, tun):
         args(credentials=str(cred), local_port=int(srv)), SID, str(work), tunnels=t, base=base
     )
     assert out["tunnel_port"] == int(srv)
+
+
+def test_mention_posted_right_after_connect_is_delivered_on_next_prompt(env, server):
+    """Regression: the first poll used to only set the start point and skip this mention."""
+    base, work, cred = env
+    from test_claude_workspace import Fake, mention
+
+    wsplugin.connect(args(credentials=str(cred), url=server), SID, str(work), base=base)
+    fake = Fake()
+    fake.events = [mention(8)]  # posted after connect (server cursor was 7)
+    out = wsplugin.run_hook(hook_payload(work), transport=fake, base=base)
+    assert out and "New workspace mention" in out["hookSpecificOutput"]["additionalContext"]
