@@ -22,7 +22,7 @@ Develop or try it without installing: `claude --plugin-dir plugins/workspace` (t
    /workspace:connect ~/Downloads/connection.json --ssh-user YOURUSER
    ```
 
-   `--ssh-user` opens a tunnel to `th-ws-7010m51.theorie.physik.uni-muenchen.de` (remote loopback :18000) as that account; `--ssh ALIAS` uses your `~/.ssh/config` alias instead. Omit both when the URL is already reachable (`--url`). With no path, Claude lists candidate files from `~/Downloads` (metadata only) and asks.
+   The first connect remembers the SSH account (`profile.json`, no secrets), so later ones are just `/workspace:connect ~/Downloads/connection.json`; `--no-tunnel --url URL` skips the tunnel. `--ssh-user` opens a tunnel to `th-ws-7010m51.theorie.physik.uni-muenchen.de` (remote loopback :18000) as that account; `--ssh ALIAS` uses your `~/.ssh/config` alias instead. Omit both when the URL is already reachable (`--url`). With no path, Claude lists candidate files from `~/Downloads` (metadata only) and asks.
 3. `/workspace:status [--check]`, `/workspace:inbox` (check now and show the pending mention), `/workspace:disconnect`.
 
 Replying or dismissing is the agent's choice, through `ws.py reply --text-file F` / `ws.py ack` (commands appear in each notification).

@@ -8,7 +8,7 @@ argument-hint: "[credential.json] [--ssh ALIAS | --ssh-user USER] [--local-port 
 Connect this conversation. The session id comes from Claude, never from the folder.
 
 1. If no credential path was given in `$ARGUMENTS`, run
-   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ws.py" discover` (lists downloaded connection files, never tokens) and ask the user which one, whether to open an SSH tunnel (their SSH alias or account) and the workspace URL if no tunnel is used.
+   `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ws.py" discover` (lists downloaded connection files, never tokens) and ask the user which one. The output also shows `saved_ssh`: if set, the tunnel reuses that SSH account automatically, so ask nothing more about SSH. If it is null, ask once for their cluster username (or an SSH alias from `~/.ssh/config`) and pass `--ssh-user USER` (or `--ssh ALIAS`); it is remembered for later connects. Ask for a workspace URL only if they do not want a tunnel (`--no-tunnel --url URL`).
 2. Run: `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ws.py" --session "${CLAUDE_SESSION_ID}" connect $ARGUMENTS` (add the user's choices as flags, using only flags listed in `connect --help`).
 3. Report only the JSON result (project, URL, tunnel port). Never print, echo or pass a token. If SSH needs a passphrase or an unknown host key, tell the user to run `ssh TARGET` themselves with the `!` prefix (accept the host key or finish the prompt), then retry.
 

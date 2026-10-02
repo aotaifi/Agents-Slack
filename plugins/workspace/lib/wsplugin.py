@@ -177,10 +177,37 @@ def discover(directory=None, limit=10):
     return found[:limit]
 
 
-def tunnel_spec(args, cfg):
-    explicit = args.ssh or args.ssh_user or args.tunnel
-    if not explicit:
+def load_profile(base):
+    """Remembered SSH account (no secrets): the researcher enters it once."""
+    try:
+        data = json.loads((Path(base) / "profile.json").read_text())
+        return data["ssh"] if isinstance(data.get("ssh"), dict) else None
+    except (OSError, ValueError, KeyError):
         return None
+
+
+def save_profile(base, spec):
+    keep = {k: spec.get(k) for k in ("target", "ssh_port", "options")}
+    write_private(Path(base) / "profile.json", {"ssh": keep})
+
+
+def tunnel_spec(args, cfg, base=None):
+    explicit = args.ssh or args.ssh_user or args.tunnel
+    if getattr(args, "no_tunnel", False):
+        return None
+    if not explicit:
+        saved = load_profile(base) if base and not args.url else None
+        if not saved:
+            return None
+        return {
+            "target": saved["target"],
+            "remote_host": args.remote_host or cfg["remote_host"],
+            "remote_port": args.remote_port or cfg["remote_port"],
+            "local_port": args.local_port,
+            "ssh_port": saved.get("ssh_port"),
+            "options": list(saved.get("options") or []),
+            "from_profile": True,
+        }
     target = args.ssh
     if not target:
         if not args.ssh_user:
@@ -220,7 +247,7 @@ def connect(args, session_id, cwd, *, tunnels=None, base=None):
             "the files in ~/Downloads."
         )
     source = read_source(args.credentials)
-    spec = tunnel_spec(args, defaults())
+    spec = tunnel_spec(args, defaults(), base)
     tunnels = tunnels or (Tunnels(base) if spec else None)
     url = args.url or source.get("url")
     owner = session_hash(session_id)
@@ -252,8 +279,12 @@ def connect(args, session_id, cwd, *, tunnels=None, base=None):
         with workspace.locked():
             workspace.save(session_id=session_id, last_poll=time.time())
             workspace.claim()
-        meta = {"tunnel": {**spec, "local_port": port} if spec else None}
+        meta = {
+            "tunnel": {**spec, "local_port": port} if spec else None  # profile flag harmless
+        }
         write_private(directory / "session.json", meta)
+        if spec and not spec.get("from_profile"):
+            save_profile(base, spec)
     except BaseException:
         shutil.rmtree(directory, ignore_errors=True)
         if started:
@@ -427,6 +458,7 @@ def parser():
     c.add_argument("--label")
     c.add_argument("--replay-backlog", action="store_true")
     c.add_argument("--tunnel", action="store_true", help="open an SSH tunnel with defaults")
+    c.add_argument("--no-tunnel", action="store_true", help="ignore the remembered SSH account")
     c.add_argument("--ssh", metavar="ALIAS_OR_USER@HOST")
     c.add_argument("--ssh-user")
     c.add_argument("--ssh-host")
@@ -455,7 +487,12 @@ def main(argv=None):
     try:
         cwd = Path.cwd()
         if args.action == "discover":
-            result = {"candidates": discover(args.dir)}
+            profile = load_profile(home())
+            result = {
+                "candidates": discover(args.dir),
+                "saved_ssh": profile["target"] if profile else None,
+                "default_ssh_host": defaults()["ssh_host"],
+            }
         elif args.action == "tunnel" and args.what == "list":
             result = tunnel_command("list", None)
         else:
