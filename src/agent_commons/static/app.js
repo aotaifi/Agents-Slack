@@ -22,6 +22,9 @@
   function actorDetail(actor) { return `${actor?.kind === 'agent' ? 'Agent' : 'Human'}${actor?.owner ? ` · owned by ${actorLabel(actor.owner)}` : ''}`; }
   function replyRootId(message) { return Object.hasOwn(message, 'reply_to') ? message.reply_to : message.metadata?.reply_to || null; }
   let recoveryGeneration = 0;
+  let connectionCredentialCleanup = null;
+  function clearConnectionCredential() { const cleanup = connectionCredentialCleanup; connectionCredentialCleanup = null; if (cleanup) cleanup(); }
+  ui.modal.addEventListener('close', () => { if (!ui.modal.open) clearConnectionCredential(); });
   let authMutationTail = Promise.resolve();
   let sessionRequestEpoch = 0;
   let sessionRotations = 0;
@@ -359,7 +362,7 @@
   async function loadMembers() { if (!state.project) return; const projectId = state.project.id; const generation = state.projectGeneration; const data = await api(`/projects/${encodeURIComponent(projectId)}/members`); if (generation === state.projectGeneration && state.project?.id === projectId) { state.members = data.items || []; updateNameControls(); } }
   async function loadActors() { const generation = state.authGeneration; try { const d = await api('/actors'); if (generation === state.authGeneration) state.actors = d.items || []; } catch { if (generation === state.authGeneration) state.actors = []; } }
   function isOwner() { return state.members.some(m => m.actor.id === state.me?.id && m.role === 'owner'); }
-  function openModal(title, kicker, content) { ui.modalTitle.textContent = title; ui.modalKicker.textContent = kicker; ui.modalContent.replaceChildren(); ui.modalContent.append(content); if (!ui.modal.open) ui.modal.showModal(); }
+  function openModal(title, kicker, content) { clearConnectionCredential(); ui.modalTitle.textContent = title; ui.modalKicker.textContent = kicker; ui.modalContent.replaceChildren(); ui.modalContent.append(content); if (!ui.modal.open) ui.modal.showModal(); }
   function formField(labelText, name, type = 'text', placeholder = '') { const label = document.createElement('label'); label.textContent = labelText; const input = document.createElement(type === 'textarea' ? 'textarea' : 'input'); if (type !== 'textarea') input.type = type; input.name = name; input.required = true; input.placeholder = placeholder; label.append(input); return { label, input }; }
   function actionRow(primaryText, onSubmit) { const actions = document.createElement('div'); actions.className = 'modal-actions'; const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'secondary-button'; cancel.textContent = 'Cancel'; cancel.addEventListener('click', () => ui.modal.close()); const submit = document.createElement('button'); submit.type = 'submit'; submit.className = 'primary-button'; submit.textContent = primaryText; actions.append(cancel, submit); return actions; }
   function createForm(title, kicker, fields, submitText, submit) {
@@ -422,9 +425,20 @@
         const picker = rolePicker(`Role for ${item.actor.name}`); picker.value = item.role === 'owner' ? 'owner' : 'guest'; const save = document.createElement('button'); save.type = 'button'; save.className = 'secondary-button small'; save.textContent = 'Save role'; save.addEventListener('click', async () => { save.disabled = true; try { await api(`/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(item.actor.id)}/role`, { method: 'PUT', body: { role: picker.value } }); if (state.project?.id === projectId && state.authGeneration === authGeneration) await showMembers(); } catch (e) { showError(e.message); save.disabled = false; } }); actions.append(picker, save);
       }
       if (isOwner() && state.me.kind === 'human' && item.actor.kind === 'agent') { const toggle = document.createElement('button'); toggle.className = 'toggle'; toggle.textContent = item.muted ? 'Unmute' : 'Mute'; toggle.addEventListener('click', async () => { try { await api(`/projects/${encodeURIComponent(state.project.id)}/members/${encodeURIComponent(item.actor.id)}`, { method: 'PATCH', body: { muted: !item.muted } }); await showMembers(); } catch (e) { showError(e.message); } }); actions.append(toggle); }
+      if (ownsAgent(item.actor)) {
+        const connect = document.createElement('button'); connect.type = 'button'; connect.className = 'secondary-button small'; connect.textContent = 'Connect session';
+        connect.addEventListener('click', () => { if (projectGeneration === state.projectGeneration && authGeneration === state.authGeneration && state.project?.id === projectId) createAgentConnection(item.actor, projectId); }); actions.append(connect);
+      }
       row.append(av, info, actions); list.append(row);
     }
     wrap.append(list);
+    if (state.me.kind === 'human') {
+      try {
+        const data = await api(`/agent-connections?project_id=${encodeURIComponent(projectId)}`);
+        if (projectGeneration !== state.projectGeneration || authGeneration !== state.authGeneration || state.project?.id !== projectId) return;
+        appendAgentConnections(wrap, data.items || [], { projectId, projectGeneration, authGeneration });
+      } catch (error) { if (projectGeneration !== state.projectGeneration || authGeneration !== state.authGeneration) return; const note = document.createElement('p'); note.className = 'modal-alert'; note.textContent = `Could not load your session connections: ${error.message}`; wrap.append(note); }
+    }
     if (isOwner() && state.me.kind === 'human') {
       try {
         const data = await api(`/projects/${encodeURIComponent(projectId)}/invitations`);
@@ -440,6 +454,57 @@
     const footer = document.createElement('div'); footer.className = 'modal-actions';
     if (state.me.kind === 'human') { const make = document.createElement('button'); make.type = 'button'; make.className = 'secondary-button'; make.textContent = 'Create an agent'; make.addEventListener('click', createAgent); footer.append(make); }
     wrap.append(footer); openModal('People', state.project.name.toUpperCase(), wrap);
+  }
+  function ownsAgent(actor) { return state.me?.kind === 'human' && actor?.kind === 'agent' && (actor.owner?.id || actor.owner_id) === state.me.id; }
+  function connectionStatus(connection) {
+    if (connection.revoked) return 'Revoked';
+    if (connection.active) return 'Session active';
+    return connection.bound ? 'Session bound, idle/offline' : 'Not connected';
+  }
+  function appendAgentConnections(wrap, connections, context) {
+    const title = document.createElement('h3'); title.textContent = 'Your session connections'; wrap.append(title);
+    const copy = document.createElement('p'); copy.className = 'modal-copy'; copy.textContent = 'Activity means a session connection is alive. It does not show whether the model is working, reading a message, or replying.'; wrap.append(copy);
+    const owned = connections.filter(connection => ownsAgent(connection.actor));
+    if (!owned.length) { const empty = document.createElement('p'); empty.className = 'empty-note'; empty.textContent = 'No session connections for your agents in this project.'; wrap.append(empty); }
+    for (const connection of owned) {
+      const row = document.createElement('div'); row.className = 'connection-row'; const info = document.createElement('div'); info.className = 'member-info';
+      const label = document.createElement('div'); label.className = 'member-name'; label.textContent = connection.label; const actor = document.createElement('div'); actor.className = 'member-sub'; actor.textContent = actorLabel(connection.actor); const status = document.createElement('div'); status.className = 'session-status'; status.textContent = connectionStatus(connection);
+      const dates = document.createElement('div'); dates.className = 'member-sub'; dates.textContent = `${connection.last_seen_at ? `Last seen ${formatDate(connection.last_seen_at)}` : 'No session activity yet'}${connection.lease_expires_at ? ` · Lease ends ${formatDate(connection.lease_expires_at)}` : ''}`; info.append(label, actor, status, dates); row.append(info);
+      if (!connection.revoked) {
+        const revoke = document.createElement('button'); revoke.type = 'button'; revoke.className = 'secondary-button small'; revoke.textContent = 'Revoke'; revoke.setAttribute('aria-label', `Revoke ${connection.label}`);
+        revoke.addEventListener('click', async () => {
+          if (context.authGeneration !== state.authGeneration || context.projectGeneration !== state.projectGeneration || state.project?.id !== context.projectId || !ownsAgent(connection.actor)) return;
+          revoke.disabled = true;
+          try { await api(`/agent-connections/${encodeURIComponent(connection.id)}`, { method: 'DELETE' }); if (context.authGeneration === state.authGeneration && context.projectGeneration === state.projectGeneration && state.project?.id === context.projectId) await showMembers(); }
+          catch (error) { if (context.authGeneration === state.authGeneration && context.projectGeneration === state.projectGeneration) { showError(error.message); revoke.disabled = false; } }
+        }); row.append(revoke);
+      }
+      wrap.append(row);
+    }
+  }
+  function createAgentConnection(actor, projectId) {
+    if (!ownsAgent(actor) || state.project?.id !== projectId || !state.members.some(m => m.actor.id === actor.id)) return;
+    const authGeneration = state.authGeneration; const projectGeneration = state.projectGeneration;
+    const label = formField('Session label', 'label', 'text', 'e.g. Tim on ws2, amplitude project'); label.input.maxLength = 200;
+    const hint = document.createElement('small'); hint.className = 'form-hint'; hint.textContent = 'Connect one Claude session for this agent and project. Save a private credential file, then use the connection helper to generate settings for that session only.'; label.label.append(hint);
+    createForm('Connect session', actorLabel(actor), [label], 'Create connection', async ([value]) => {
+      if (authGeneration !== state.authGeneration || projectGeneration !== state.projectGeneration || state.project?.id !== projectId || !ownsAgent(actor) || !state.members.some(m => m.actor.id === actor.id)) throw new Error('The account or project changed. Open People and try again.');
+      const result = await api('/agent-connections', { method: 'POST', body: { actor_id: actor.id, project_id: projectId, label: value.trim() } });
+      if (authGeneration !== state.authGeneration || projectGeneration !== state.projectGeneration || state.project?.id !== projectId) { result.token = ''; return; }
+      let token = result.token; result.token = '';
+      const connection = Object.fromEntries(['id', 'label', 'actor', 'project', 'bound', 'active', 'lease_expires_at', 'last_seen_at', 'revoked', 'created_at'].filter(key => Object.hasOwn(result.connection, key)).map(key => [key, result.connection[key]]));
+      const wrap = document.createElement('div'); const note = document.createElement('p'); note.className = 'modal-copy'; note.textContent = 'Save this private credential file now. Its token is shown once and is scoped to this agent and project. Keep the file private.'; wrap.append(note);
+      const secret = document.createElement('code'); secret.className = 'connection-secret'; secret.textContent = token; wrap.append(secret);
+      const save = document.createElement('button'); save.type = 'button'; save.className = 'primary-button'; save.textContent = 'Save connection file';
+      save.addEventListener('click', () => {
+        if (!token || authGeneration !== state.authGeneration || projectGeneration !== state.projectGeneration || state.project?.id !== projectId) return;
+        const blob = new Blob([JSON.stringify({ url: location.origin, token, connection }, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `agent-connection-${connection.id}.json`; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); save.textContent = 'Save connection file again';
+      }); wrap.append(save);
+      const launch = document.createElement('p'); launch.className = 'modal-copy connection-help'; launch.textContent = 'Use the saved file with the connection helper to generate a private Claude settings file. Launch a single Claude session with --settings pointing to that file. This does not install global hooks or promise an automatic response.';
+      const network = document.createElement('p'); network.className = 'modal-copy'; network.textContent = `The file uses this browser’s workspace URL (${location.origin}). On a remote host, use a workspace URL reachable from that host; the helper supports a --url override. A localhost browser tunnel is not automatically available on the remote host.`;
+      const done = document.createElement('button'); done.type = 'button'; done.className = 'secondary-button'; done.textContent = 'Done'; done.addEventListener('click', async () => { clearConnectionCredential(); ui.modal.close(); if (authGeneration === state.authGeneration && projectGeneration === state.projectGeneration && state.project?.id === projectId) await showMembers(); }); wrap.append(launch, network, done);
+      openModal('Connection created', 'ONE-TIME SESSION CREDENTIAL', wrap); connectionCredentialCleanup = () => { token = ''; secret.textContent = ''; wrap.replaceChildren(); };
+    });
   }
   function rolePicker(label) {
     const select = document.createElement('select'); select.setAttribute('aria-label', label);

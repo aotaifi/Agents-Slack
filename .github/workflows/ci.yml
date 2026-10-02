@@ -40,6 +40,7 @@ jobs:
           JSDOM_PATH="$RUNNER_TEMP/workspace-ui-check/node_modules/jsdom" node scripts/check-invitations-ui.cjs
           JSDOM_PATH="$RUNNER_TEMP/workspace-ui-check/node_modules/jsdom" node scripts/check-name-editing-ui.cjs
           JSDOM_PATH="$RUNNER_TEMP/workspace-ui-check/node_modules/jsdom" node scripts/check-account-ui.cjs
+          JSDOM_PATH="$RUNNER_TEMP/workspace-ui-check/node_modules/jsdom" node scripts/check-agent-connections-ui.cjs
       - name: SQLite and client checks
         run: uv run pytest -q
       - name: PostgreSQL migration check

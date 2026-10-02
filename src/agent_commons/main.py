@@ -19,6 +19,7 @@ from .identity import choose_handle
 from .invitation_email import MailUnavailable, email_enabled, invitation_message, submit_invitation
 from .models import (
     Actor,
+    AgentConnection,
     AuthAttempt,
     BrowserSession,
     Channel,
@@ -36,6 +37,8 @@ from .models import (
 )
 from .schemas import (
     ActorInput,
+    AgentConnectionInput,
+    AgentSessionInput,
     InvitationAccept,
     InvitationCode,
     InvitationEmail,
@@ -52,7 +55,7 @@ from .schemas import (
     RulesInput,
     ThreadInput,
 )
-from .security import digest, hash_password, issue_token, verify_password
+from .security import credential_lock_key, digest, hash_password, issue_token, verify_password
 
 
 def actor_json(a):
@@ -171,6 +174,7 @@ def create_app(database_url: str | None = None):
 
     def resolve_identity(request, authorization, db):
         # Explicit bearer credentials never silently fall back to another identity.
+        connection = None
         if authorization:
             if not authorization.startswith("Bearer ") or len(authorization) > 512:
                 raise HTTPException(401, "Invalid or revoked token")
@@ -178,6 +182,16 @@ def create_app(database_url: str | None = None):
             if token is None or token.revoked:
                 raise HTTPException(401, "Invalid or revoked token")
             actor = db.get(Actor, token.actor_id)
+            if token.connection_id:
+                connection = db.get(AgentConnection, token.connection_id, populate_existing=True)
+                if (
+                    connection is None
+                    or connection.revoked
+                    or actor is None
+                    or actor.kind != "agent"
+                    or connection.actor_id != actor.id
+                ):
+                    raise HTTPException(401, "Invalid or revoked connection")
         else:
             raw = request.cookies.get("workspace_session")
             if not raw or len(raw) > 128:
@@ -190,6 +204,10 @@ def create_app(database_url: str | None = None):
                 raise HTTPException(401, "Invalid session")
             if request.method not in {"GET", "HEAD", "OPTIONS"}:
                 same_origin(request)
+        # These attributes exist only on this request's ORM instance, never JSON.
+        actor._workspace_connection = connection
+        actor._workspace_session_id = request.headers.get("x-workspace-session")
+        actor._workspace_mutating = request.method in {"POST", "PUT", "PATCH", "DELETE"}
         request.state.actor_handle = actor.handle
         return actor
 
@@ -299,14 +317,18 @@ def create_app(database_url: str | None = None):
         if a.kind != "human":
             raise HTTPException(403, "Human action required")
 
-    def project_access(db, a, project_id, write=False, owner=False):
+    def project_access(db, a, project_id, write=False, owner=False, lease=True, lock=False):
+        connection = getattr(a, "_workspace_connection", None)
+        if connection is not None and connection.project_id != project_id:
+            raise HTTPException(404, "Project not found")
         # The project lock is held until the entire request transaction commits.
         # Under PostgreSQL READ COMMITTED, later writers see committed cursor/key state.
         query = select(Project).where(Project.id == project_id)
-        if write or owner:
+        mutating_connection = connection is not None and getattr(a, "_workspace_mutating", False)
+        if write or owner or lock or mutating_connection:
             query = query.with_for_update()
         p = db.scalar(query.execution_options(populate_existing=True))
-        m = db.get(Membership, (project_id, a.id))
+        m = db.get(Membership, (project_id, a.id), populate_existing=True)
         if p is None or m is None:
             raise HTTPException(404, "Project not found")
         if owner:
@@ -315,6 +337,21 @@ def create_app(database_url: str | None = None):
                 raise HTTPException(403, "Project owner required")
         if write and m.muted:
             raise HTTPException(403, "Participant is muted")
+        if connection is not None:
+            db.refresh(connection)
+            if connection.revoked:
+                raise HTTPException(401, "Invalid or revoked connection")
+            if lease and mutating_connection:
+                session_id = getattr(a, "_workspace_session_id", None)
+                if (
+                    not session_id
+                    or len(session_id) > 200
+                    or not connection.session_digest
+                    or not hmac.compare_digest(connection.session_digest, digest(session_id))
+                    or connection.lease_expires_at is None
+                    or utc(connection.lease_expires_at) <= now()
+                ):
+                    raise HTTPException(403, "Claim an active lease for this session first")
         return p
 
     def resource(db, a, model, resource_id, write=False):
@@ -356,9 +393,191 @@ def create_app(database_url: str | None = None):
             raise HTTPException(503, "Database unavailable") from None
         return {"status": "ok"}
 
+    def lock_actor_credentials(db, actor_ids):
+        if engine.dialect.name == "postgresql":
+            for actor_id in sorted(set(actor_ids)):
+                db.execute(
+                    text("SELECT pg_advisory_xact_lock(:key)"),
+                    {"key": credential_lock_key(actor_id)},
+                )
+
+    def connection_json(db, connection):
+        actor = db.get(Actor, connection.actor_id)
+        project = db.get(Project, connection.project_id)
+        return {
+            "id": connection.id,
+            "actor": actor_json(actor),
+            "project": {"id": project.id, "name": project.name},
+            "label": connection.label,
+            "created_at": timestamp(connection.created_at),
+            "revoked": connection.revoked,
+            "bound": connection.session_digest is not None,
+            "active": (
+                not connection.revoked
+                and connection.lease_expires_at is not None
+                and utc(connection.lease_expires_at) > now()
+            ),
+            "lease_expires_at": timestamp(connection.lease_expires_at)
+            if connection.lease_expires_at
+            else None,
+            "last_seen_at": timestamp(connection.last_seen_at) if connection.last_seen_at else None,
+        }
+
+    def visible_connection(db, a, connection_id, *, own_token=False, lock=False, write=False):
+        connection = db.get(AgentConnection, connection_id)
+        scoped = getattr(a, "_workspace_connection", None)
+        if connection is None:
+            raise HTTPException(404, "Connection not found")
+        if own_token:
+            if scoped is None or scoped.id != connection.id:
+                raise HTTPException(403, "Use this connection's credential")
+        elif a.kind == "human":
+            if db.get(Actor, connection.actor_id).owner_id != a.id:
+                raise HTTPException(404, "Connection not found")
+        elif scoped is None or scoped.id != connection.id:
+            raise HTTPException(404, "Connection not found")
+        project_access(db, a, connection.project_id, write=write, lock=lock, lease=False)
+        db.refresh(connection)
+        return connection
+
+    @app.post("/v1/agent-connections", status_code=201)
+    def create_connection(
+        body: AgentConnectionInput,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        if getattr(a, "_workspace_connection", None) is not None:
+            raise HTTPException(403, "Connection credentials cannot create connections")
+        if a.kind == "human":
+            if body.actor_id is None:
+                raise HTTPException(422, "Choose one of your agents")
+            actor = db.get(Actor, str(body.actor_id))
+            if actor is None or actor.kind != "agent" or actor.owner_id != a.id:
+                raise HTTPException(403, "Choose one of your own agents")
+        else:
+            if body.actor_id is not None and str(body.actor_id) != a.id:
+                raise HTTPException(403, "Agents can create connections only for themselves")
+            actor = a
+        lock_actor_credentials(db, [a.id, actor.id])
+        # Actor revocation uses these same locks. The source may have been revoked
+        # while this request waited, and must not mint a replacement credential.
+        resolve_identity(request, authorization, db)
+        project_id = str(body.project_id)
+        project_access(db, a, project_id, write=True)
+        membership = db.get(Membership, (project_id, actor.id), populate_existing=True)
+        if membership is None:
+            raise HTTPException(404, "Agent is not a project member")
+        if membership.muted:
+            raise HTTPException(403, "Participant is muted")
+        connection = AgentConnection(actor_id=actor.id, project_id=project_id, label=body.label)
+        db.add(connection)
+        db.flush()
+        token = issue_token(db, actor, connection_id=connection.id)
+        return {"connection": connection_json(db, connection), "token": token}
+
+    @app.get("/v1/agent-connections")
+    def connections(
+        project_id: UUID | None = None,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        human(a)
+        query = (
+            select(AgentConnection)
+            .join(Actor, Actor.id == AgentConnection.actor_id)
+            .join(
+                Membership,
+                (Membership.project_id == AgentConnection.project_id)
+                & (Membership.actor_id == a.id),
+            )
+            .where(Actor.owner_id == a.id)
+            .order_by(AgentConnection.created_at.desc(), AgentConnection.id)
+        )
+        if project_id is not None:
+            query = query.where(AgentConnection.project_id == str(project_id))
+        return {"items": [connection_json(db, connection) for connection in db.scalars(query)]}
+
+    @app.get("/v1/agent-connections/{connection_id}")
+    def get_connection(
+        connection_id: str,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        return connection_json(db, visible_connection(db, a, connection_id))
+
+    @app.delete("/v1/agent-connections/{connection_id}", status_code=204)
+    def revoke_connection(
+        connection_id: str,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        human(a)
+        connection = visible_connection(db, a, connection_id, lock=True)
+        connection.revoked, connection.lease_expires_at = True, None
+        db.execute(update(Token).where(Token.connection_id == connection.id).values(revoked=True))
+        return Response(status_code=204)
+
+    @app.post("/v1/agent-connections/{connection_id}/claim")
+    def claim_connection(
+        connection_id: str,
+        body: AgentSessionInput,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        connection = visible_connection(db, a, connection_id, own_token=True, lock=True, write=True)
+        supplied = digest(body.session_id)
+        if connection.session_digest and not hmac.compare_digest(
+            connection.session_digest, supplied
+        ):
+            raise HTTPException(409, "Connection is permanently bound to a different session")
+        current = now()
+        competing = db.scalar(
+            select(AgentConnection.id)
+            .where(
+                AgentConnection.actor_id == a.id,
+                AgentConnection.project_id == connection.project_id,
+                AgentConnection.id != connection.id,
+                AgentConnection.revoked.is_(False),
+                AgentConnection.lease_expires_at > current,
+            )
+            .limit(1)
+        )
+        if competing is not None:
+            raise HTTPException(409, "This agent already has an active connection in the project")
+        connection.session_digest = supplied
+        connection.lease_expires_at = current + timedelta(seconds=300)
+        connection.last_seen_at = current
+        db.flush()
+        return {"connection": connection_json(db, connection)}
+
+    @app.post("/v1/agent-connections/{connection_id}/release")
+    def release_connection(
+        connection_id: str,
+        body: AgentSessionInput,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        connection = visible_connection(db, a, connection_id, own_token=True, lock=True)
+        if not connection.session_digest or not hmac.compare_digest(
+            connection.session_digest, digest(body.session_id)
+        ):
+            raise HTTPException(409, "Connection is permanently bound to a different session")
+        connection.lease_expires_at = None
+        db.flush()
+        return {"connection": connection_json(db, connection)}
+
     @app.get("/v1/me")
-    def me(a=Depends(authenticated, scope="function")):
-        return self_actor_json(a)
+    def me(
+        a=Depends(authenticated, scope="function"), db: Session = Depends(session, scope="function")
+    ):
+        result = self_actor_json(a)
+        connection = getattr(a, "_workspace_connection", None)
+        if connection is not None:
+            project_access(db, a, connection.project_id)
+            result["connection"] = connection_json(db, connection)
+        return result
 
     @app.patch("/v1/me")
     def edit_profile(
@@ -590,7 +809,16 @@ def create_app(database_url: str | None = None):
         return Response(status_code=204)
 
     @app.post("/v1/invitations/preview")
-    def preview_invitation(body: InvitationCode, db: Session = Depends(session, scope="function")):
+    def preview_invitation(
+        body: InvitationCode,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        db: Session = Depends(session, scope="function"),
+    ):
+        if authorization:
+            identity = resolve_identity(request, authorization, db)
+            if getattr(identity, "_workspace_connection", None) is not None:
+                raise HTTPException(403, "Connection credentials cannot preview invitations")
         invitation, project = valid_invitation(db, body.code, claim_secret=body.claim_secret)
         return {
             "project": project_json(project),
@@ -606,6 +834,10 @@ def create_app(database_url: str | None = None):
         authorization: str | None = Header(default=None),
         db: Session = Depends(session, scope="function"),
     ):
+        if authorization:
+            invited_identity = resolve_identity(request, authorization, db)
+            if getattr(invited_identity, "_workspace_connection", None) is not None:
+                raise HTTPException(403, "Connection credentials cannot accept invitations")
         new_password_hash = None
         anonymous_password = (
             body.password is not None
@@ -742,15 +974,33 @@ def create_app(database_url: str | None = None):
         db: Session = Depends(session, scope="function"),
     ):
         human(a)
+        target = db.get(Actor, actor_id)
+        if target is None or not (a.is_admin or target.owner_id == a.id or target.id == a.id):
+            raise HTTPException(404, "Actor not found")
+        lock_actor_credentials(db, [actor_id])
+        projects_to_lock = select(AgentConnection.project_id).where(
+            AgentConnection.actor_id == actor_id
+        )
+        list(
+            db.scalars(
+                select(Project)
+                .where(Project.id.in_(projects_to_lock))
+                .order_by(Project.id)
+                .with_for_update()
+            )
+        )
         target = db.scalar(
             select(Actor)
             .where(Actor.id == actor_id)
             .with_for_update()
             .execution_options(populate_existing=True)
         )
-        if target is None or not (a.is_admin or target.owner_id == a.id or target.id == a.id):
-            raise HTTPException(404, "Actor not found")
         db.execute(update(Token).where(Token.actor_id == actor_id).values(revoked=True))
+        db.execute(
+            update(AgentConnection)
+            .where(AgentConnection.actor_id == actor_id)
+            .values(revoked=True, lease_expires_at=None)
+        )
         if target.kind == "human":
             target.password_hash = None
             db.execute(
@@ -764,13 +1014,16 @@ def create_app(database_url: str | None = None):
     def projects(
         a=Depends(authenticated, scope="function"), db: Session = Depends(session, scope="function")
     ):
-        items = db.scalars(
+        query = (
             select(Project)
             .join(Membership)
             .where(Membership.actor_id == a.id)
             .order_by(Project.name, Project.id)
         )
-        return {"items": [project_json(p) for p in items]}
+        connection = getattr(a, "_workspace_connection", None)
+        if connection is not None:
+            query = query.where(Project.id == connection.project_id)
+        return {"items": [project_json(p) for p in db.scalars(query)]}
 
     @app.post("/v1/projects", status_code=201)
     def create_project(

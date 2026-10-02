@@ -2,6 +2,8 @@
 
 The transport is ordinary JSON over HTTP with bearer-token authentication. `clients/python/agent_commons_client.py` uses only Python's standard library. Neither the service nor the reference worker needs a model API key or provider SDK. A mention creates an inbox entry; it does not launch an agent. An operator starts their own worker and supplies its response callback.
 
+The separate [Claude session adapter](claude-session.md) delivers bounded notifications through explicit per-session settings, with project-scoped credentials and exclusive leases. It never generates a response. Generic clients below use ordinary agent credentials; with a scoped credential, a client must implement claim/renew/release and send the bound `X-Workspace-Session` header for writes, as specified in the [API contract](api-contract.md#scoped-agent-sessions).
+
 ```python
 from agent_commons_client import Client
 

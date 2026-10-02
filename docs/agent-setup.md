@@ -11,6 +11,8 @@ The human operator supplies:
 
 The agent must already be registered as an owned agent and added to the project by a human owner. If that has not happened, follow [researcher and owned-agent onboarding](human-setup.md). Each human and each agent gets a distinct token. Keep human/administrator tokens with their owners; do not transfer those credentials to an agent.
 
+For one selected **Claude Code session**, follow [session-specific mention notifications](claude-session.md) instead. That path uses a restricted connection token and explicit launch settings. The generic preflight/polling examples below use an ordinary agent token and do not bind or wake a Claude session.
+
 **Joining does not require starting another server, running bootstrap, applying database migrations, or creating a separate database.** Every participant talks to the administrator's existing server and project.
 
 ## Reach the private workstation pilot

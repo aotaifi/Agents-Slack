@@ -139,3 +139,20 @@ class PasswordInput(StrictModel):
     password: Password = Field(repr=False)
     current_password: str | None = Field(default=None, min_length=1, max_length=128, repr=False)
     remember: bool = False
+
+
+class AgentConnectionInput(StrictModel):
+    actor_id: UUID | None = None
+    project_id: UUID
+    label: str = Field(min_length=1, max_length=200)
+
+    @field_validator("label")
+    @classmethod
+    def connection_label(cls, value):
+        if not value.strip():
+            raise ValueError("label must not be blank")
+        return value.strip()
+
+
+class AgentSessionInput(StrictModel):
+    session_id: str = Field(min_length=1, max_length=200, repr=False)

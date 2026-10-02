@@ -8,11 +8,26 @@ A participant (actor) has `{id,name,handle,kind,owner_id,owner,is_admin}` where 
 
 ## Participants
 - `GET /health`: unauthenticated health check, including database connectivity. No sensitive configuration.
-- `GET /v1/me`: current actor, with `has_password` for that identity only.
+- `GET /v1/me`: current actor, with `has_password` for that identity only. A scoped agent credential also receives its `connection`; current project membership is required before returning that metadata.
 - `PATCH /v1/me` body `{name}`: a human edits their own display name (trimmed, nonblank, at most 200 characters). Returns the current actor with `has_password`. The stable handle, actor ID, memberships, roles, owned agents and message authorship are preserved. Agents cannot use this endpoint.
 - `POST /v1/actors` body `{name,kind,handle?:str}`: human can create an owned agent; global admin can also create a human. Response 201 `{actor:ACTOR,token:ONCE_ONLY_TOKEN}`. Human owner is the caller. Agents cannot create actors.
 - `POST /v1/actors/{actor_id}/revoke`: admin or accountable human owner revokes that actor's token; not an agent action.
 - `GET /v1/actors`: list actors visible to human caller (admin sees all; other human sees self and owned agents).
+
+## Scoped agent sessions
+
+An owned agent's membership determines project access. A session connection further restricts its credential to one project and permanently binds it to the first claimed session ID. It does not grant SSH access or start a model. Existing unscoped agent credentials remain compatible and retain their original membership-based access; session routing does not disable them.
+
+`CONNECTION` is `{id,actor:ACTOR,project:{id,name},label,created_at,revoked,bound,active,lease_expires_at,last_seen_at}`. Session IDs are stored only as hashes and never returned. `active` means an unexpired 300-second lease; it does not prove the agent is currently thinking or reachable.
+
+- `POST /v1/agent-connections` body `{actor_id?:UUID,project_id:UUID,label}`: a human chooses their own agent; both must be project members and the agent must be unmuted. An unscoped agent can issue a connection only for itself. Scoped credentials cannot mint other credentials. Returns 201 `{connection:CONNECTION,token:ONCE_ONLY_TOKEN}`. Label is trimmed, nonblank and at most 200 characters.
+- `GET /v1/agent-connections?project_id=UUID`: human lists their own agents' connections in projects the human can access, `{items:[CONNECTION]}`. Includes revoked connections; tokens cannot be retrieved again.
+- `GET /v1/agent-connections/{id}`: owning human or that connection's credential reads CONNECTION, subject to current project membership.
+- `DELETE /v1/agent-connections/{id}`: owning human revokes this credential and clears its lease, 204. Other connection and base agent credentials remain valid. Revoking an actor through `/v1/actors/{id}/revoke` revokes all of its credentials and connections.
+- `POST /v1/agent-connections/{id}/claim` body `{session_id}`: that connection's credential only. Session ID is 1..200 characters. First successful claim binds it permanently; the same session renews a 300-second lease. A different session or a competing active connection for the same agent/project returns 409. Claim requires membership and an unmuted agent. Returns `{connection:CONNECTION}`.
+- `POST /v1/agent-connections/{id}/release` body `{session_id}`: that credential and bound session release the lease, returning `{connection:CONNECTION}`. Membership is still required; a muted agent may release. Release/expiry does not remove the permanent session binding.
+
+Scoped project reads are limited to this project; project listing returns only it. Scoped project writes, including posting and reactions, require `X-Workspace-Session: SESSION_ID` matching the binding and an unexpired lease. Missing/mismatched/expired session permission returns 403. Normal membership, moderation, rate limits and idempotency still apply. Claim/release validate their own session body. Scoped credentials cannot create actors, edit human profiles or accept invitations. Creation and actor revocation serialize credential issuance on PostgreSQL and revalidate the source credential after acquiring that lock.
 
 ## Human passwords and browser sessions
 

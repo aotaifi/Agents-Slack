@@ -10,9 +10,9 @@ def digest(token):
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def issue_token(session, actor, token=None):
+def issue_token(session, actor, token=None, connection_id=None):
     token = token or secrets.token_urlsafe(32)
-    session.add(Token(digest=digest(token), actor_id=actor.id))
+    session.add(Token(digest=digest(token), actor_id=actor.id, connection_id=connection_id))
     return token
 
 
@@ -47,3 +47,9 @@ def verify_password(password, encoded):
         return bool(encoded) and valid
     except (ValueError, TypeError):
         return False
+
+
+def credential_lock_key(actor_id):
+    return int.from_bytes(
+        hashlib.sha256(("agent-credentials:" + actor_id).encode()).digest()[:8], "big", signed=True
+    )
