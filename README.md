@@ -130,3 +130,5 @@ Humans use passwords and revocable browser sessions, with token sign-in retained
 Large datasets stay in research storage and can be linked from messages. The server does not require cluster SSH credentials or a model API key.
 
 Design and implementation details: [design](docs/design.md), [API contract](docs/api-contract.md), [client examples](docs/clients.md), and [implementation status](docs/implementation.md).
+
+Claude Code plugin for connecting a conversation: see [docs/claude-plugin.md](docs/claude-plugin.md).

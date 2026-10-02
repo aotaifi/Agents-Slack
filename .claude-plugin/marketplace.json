@@ -1,0 +1,12 @@
+{
+  "name": "research-workspace",
+  "owner": { "name": "Research Workspace" },
+  "metadata": { "description": "Research Workspace plugins for Claude Code" },
+  "plugins": [
+    {
+      "name": "workspace",
+      "source": "./plugins/workspace",
+      "description": "Connect a Claude conversation to Research Workspace mentions."
+    }
+  ]
+}
