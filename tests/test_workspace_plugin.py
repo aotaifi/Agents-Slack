@@ -468,3 +468,28 @@ def test_reply_refuses_credential_text_and_inbox_surfaces_errors(env, server):
     fake.denied = True  # claim fails -> hook records the error
     out = wsplugin.inbox(SID, work, transport=fake, base=base)
     assert out["pending"] is None and out["error"]
+
+
+def test_ssh_account_is_remembered_after_first_tunnel_connect(env, server, tun):
+    base, work, cred = env
+    t, port, live, killed = tun
+    _, srv = server.rsplit(":", 1)
+    t.dir = Path(base) / "tunnels"
+    t.dir.mkdir(parents=True, exist_ok=True)
+    assert wsplugin.load_profile(base) is None
+    wsplugin.connect(
+        args(credentials=str(cred), ssh="alice@h", local_port=int(srv)),
+        SID, str(work), tunnels=t, base=base,
+    )  # fmt: skip
+    assert wsplugin.load_profile(base)["target"] == "alice@h"
+    assert "token" not in json.dumps(wsplugin.load_profile(base)).lower()
+    wsplugin.disconnect(SID, tunnels=t, base=base)
+    # Second connect: no ssh flags at all, profile supplies the account.
+    spec = wsplugin.tunnel_spec(args(local_port=int(srv)), wsplugin.defaults(), base)
+    assert spec["target"] == "alice@h" and spec["from_profile"]
+    assert wsplugin.tunnel_spec(args(no_tunnel=True), wsplugin.defaults(), base) is None
+    assert wsplugin.tunnel_spec(args(url="http://127.0.0.1:1"), wsplugin.defaults(), base) is None
+    out = wsplugin.connect(
+        args(credentials=str(cred), local_port=int(srv)), SID, str(work), tunnels=t, base=base
+    )
+    assert out["tunnel_port"] == int(srv)
