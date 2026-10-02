@@ -18,7 +18,7 @@ async function create(transport = async () => response(null, 401), storage = {})
   w.Headers = Headers; w.crypto.randomUUID = require('node:crypto').randomUUID;
   w.HTMLDialogElement.prototype.showModal = function () { this.open = true; }; w.HTMLDialogElement.prototype.close = function () { this.open = false; };
   for (const [key, value] of Object.entries(storage)) w.sessionStorage.setItem(key, value);
-  w.fetch = async (url, options = {}) => { const request = { url, ...options, body: options.body ? JSON.parse(options.body) : null }; requests.push(request); if (url === '/v1/projects') return response({ items: [] }); return transport(request); };
+  w.fetch = async (url, options = {}) => { const request = { url, ...options, body: options.body ? JSON.parse(options.body) : null }; requests.push(request); if (url.startsWith('/v1/notifications?')) return response({ items: [], next_cursor: null, cursor: null, unread_count: 0 }); if (url === '/v1/projects') return response({ items: [] }); return transport(request); };
   w.eval(source.replace('  const savedToken = state.token;', '  window.__accountTest = { state, ui, signIn, passwordSignIn, restoreSession, showAccount, signOut, openInvitation, pollEvents };\n  const savedToken = state.token;'));
   await tick(); return { dom, w, requests, ...w.__accountTest };
 }

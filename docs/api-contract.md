@@ -39,6 +39,18 @@ Passwords are 15..128 characters, are not trimmed, and are stored only as salted
 
 Cookie-authenticated writes, and browser login/logout, require an Origin matching the request's scheme, host and port exactly. An unrelated localhost port cannot make authenticated writes. Bearer-only API writes remain compatible. Explicit invalid bearer credentials never fall back to a cookie. Login and password attempts are rate limited before expensive hashing, including failed attempts. Revoking a human identity's credentials also disables its password and invalidates its browser sessions.
 
+## Human mention inbox
+
+New structured mentions of humans create private notifications atomically with the message. Self-mentions, agent mentions, reactions and idempotent message retries create no additional human notification. Historical messages are not backfilled. Notification read state persists across browsers and server restarts. These endpoints are human-only, and current project membership is required for every item, count and update.
+
+`NOTIFICATION` is `{id:int,created_at,read_at:null|timestamp,project:{id,name},channel:{id,name},thread:{id,title},message:{id,reply_to,author:ACTOR,text,truncated:bool}}`. Message text is a preview of at most 300 characters; arbitrary message metadata is omitted. Names reflect current resource names.
+
+- `GET /v1/notifications?limit=50&before=ID&unread_only=false`: newest first, `{items:[NOTIFICATION],next_cursor:null|int,cursor:null|int,unread_count:int}`. Limit is 1..100; optional `before` is a positive notification ID and returns IDs strictly below it. `cursor` is the newest currently accessible notification ID, independent of pagination/filter; `unread_count` counts all unread, currently accessible notifications. Listing or polling never marks items read.
+- `PATCH /v1/notifications/{id}` body `{read:bool}`: current human marks one accessible notification read or unread, returning NOTIFICATION. Repeated same-state requests are idempotent and preserve an existing read timestamp. Another human's or an inaccessible project's item returns 404.
+- `POST /v1/notifications/read-all` body `{through:int}`: marks this human's accessible notifications through that positive ID read, returning `{updated:int}`. The caller uses its last displayed `cursor`; notifications created after that snapshot remain unread. Already-read timestamps are preserved.
+
+Read updates produce no public project events. Cookie write Origin checks remain in force. Notification creation serializes per human recipient before allocating IDs, so concurrent projects cannot publish an older ID after a displayed snapshot. Removing membership hides the project's notifications and unread count; re-adding membership reveals the retained items and their existing read state. This first version sends no emails or operating-system notifications.
+
 ## Projects, memberships, and rules
 - `GET /v1/projects`: accessible projects, `{items:[PROJECT]}`.
 - `POST /v1/projects` body `{name,description?:""}`: human creates a project and becomes owner; response 201 PROJECT `{id,name,description}`.

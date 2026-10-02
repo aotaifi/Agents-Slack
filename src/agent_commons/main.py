@@ -28,6 +28,7 @@ from .models import (
     Invitation,
     Membership,
     Message,
+    Notification,
     Project,
     RateWindow,
     Reaction,
@@ -49,6 +50,8 @@ from .schemas import (
     MessageInput,
     MuteInput,
     Named,
+    NotificationReadInput,
+    NotificationsReadAllInput,
     PasswordInput,
     ProjectInput,
     ReactionInput,
@@ -658,6 +661,137 @@ def create_app(database_url: str | None = None):
             samesite="strict",
         )
         return {"status": "ok"}
+
+    def notification_scope(a):
+        return (
+            select(Notification)
+            .join(
+                Membership,
+                (Membership.project_id == Notification.project_id) & (Membership.actor_id == a.id),
+            )
+            .where(Notification.actor_id == a.id)
+        )
+
+    def notification_json(db, notification, related=None):
+        if related is None:
+            message = db.get(Message, notification.message_id)
+            thread = db.get(Thread, message.thread_id)
+            channel = db.get(Channel, thread.channel_id)
+            project = db.get(Project, notification.project_id)
+            author = db.get(Actor, message.author_id)
+        else:
+            project, channel, thread, message, author = related
+        return {
+            "id": notification.id,
+            "created_at": timestamp(notification.created_at),
+            "read_at": timestamp(notification.read_at) if notification.read_at else None,
+            "project": {"id": project.id, "name": project.name},
+            "channel": {"id": channel.id, "name": channel.name},
+            "thread": {"id": thread.id, "title": thread.title},
+            "message": {
+                "id": message.id,
+                "reply_to": message.reply_to,
+                "author": actor_json(author),
+                "text": message.text[:300],
+                "truncated": len(message.text) > 300,
+            },
+        }
+
+    @app.get("/v1/notifications")
+    def notifications(
+        limit: int = Query(50, ge=1, le=100),
+        before: int | None = Query(default=None, ge=1),
+        unread_only: bool = False,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        human(a)
+        scope = notification_scope(a)
+        cursor, unread_count = db.execute(
+            scope.with_only_columns(
+                func.max(Notification.id),
+                func.count(Notification.id).filter(Notification.read_at.is_(None)),
+            )
+        ).one()
+        if cursor is None:
+            return {"items": [], "next_cursor": None, "cursor": None, "unread_count": 0}
+        query = (
+            scope.add_columns(Project, Channel, Thread, Message, Actor)
+            .join(Message, Message.id == Notification.message_id)
+            .join(Thread, Thread.id == Message.thread_id)
+            .join(Channel, Channel.id == Thread.channel_id)
+            .join(Project, Project.id == Notification.project_id)
+            .join(Actor, Actor.id == Message.author_id)
+            .where(Notification.id <= cursor)
+        )
+        if before is not None:
+            query = query.where(Notification.id < before)
+        if unread_only:
+            query = query.where(Notification.read_at.is_(None))
+        rows = list(db.execute(query.order_by(Notification.id.desc()).limit(limit + 1)))
+        return {
+            "items": [notification_json(db, row[0], row[1:]) for row in rows[:limit]],
+            "next_cursor": rows[limit - 1][0].id if len(rows) > limit else None,
+            "cursor": cursor,
+            "unread_count": unread_count,
+        }
+
+    @app.patch("/v1/notifications/{notification_id}")
+    def read_notification(
+        notification_id: int,
+        body: NotificationReadInput,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        human(a)
+        notification = db.scalar(notification_scope(a).where(Notification.id == notification_id))
+        if notification is None:
+            raise HTTPException(404, "Notification not found")
+        # Membership removal and read updates use the same project lock. Refresh
+        # after waiting so repeated reads preserve the first committed timestamp.
+        project_access(db, a, notification.project_id, lock=True)
+        db.refresh(notification)
+        if body.read and notification.read_at is None:
+            notification.read_at = now()
+        elif not body.read:
+            notification.read_at = None
+        db.flush()
+        return notification_json(db, notification)
+
+    @app.post("/v1/notifications/read-all")
+    def read_all_notifications(
+        body: NotificationsReadAllInput,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        human(a)
+        scope = notification_scope(a).where(
+            Notification.id <= body.through, Notification.read_at.is_(None)
+        )
+        project_ids = scope.with_only_columns(Notification.project_id).distinct()
+        # Fixed lock order prevents membership changes during the update. The
+        # final membership subquery excludes projects lost while acquiring locks.
+        list(
+            db.scalars(
+                select(Project)
+                .where(Project.id.in_(project_ids))
+                .order_by(Project.id)
+                .with_for_update()
+            )
+        )
+        visible_projects = select(Membership.project_id).where(Membership.actor_id == a.id)
+        result = db.execute(
+            update(Notification)
+            .where(
+                Notification.actor_id == a.id,
+                Notification.id <= body.through,
+                Notification.read_at.is_(None),
+                Notification.project_id.in_(visible_projects),
+            )
+            .values(read_at=now())
+            .execution_options(synchronize_session=False)
+        )
+        return {"updated": result.rowcount}
 
     @app.get("/v1/connection")
     def connection():
@@ -1337,6 +1471,14 @@ def create_app(database_url: str | None = None):
         for actor_id in body.mentions:
             if not db.get(Membership, (p.id, actor_id)):
                 raise HTTPException(422, "Mentioned actor is not a project member")
+        recipients = list(
+            db.scalars(
+                select(Actor)
+                .where(Actor.id.in_(set(body.mentions)), Actor.id != a.id, Actor.kind == "human")
+                .order_by(Actor.id)
+                .with_for_update(key_share=True)
+            )
+        )
         enforce_rate(db, p, a)
         m = Message(
             thread_id=t.id,
@@ -1350,6 +1492,12 @@ def create_app(database_url: str | None = None):
         )
         db.add(m)
         db.flush()
+        for recipient in recipients:
+            db.add(
+                Notification(
+                    actor_id=recipient.id, project_id=p.id, message_id=m.id, created_at=m.created_at
+                )
+            )
         result = message_json(db, m)
         emit(db, p, "message.created", result, t.id)
         if idempotency_key is not None:
