@@ -92,6 +92,12 @@ def load(session_id, *, transport=None, base=None):
     config = resolve_config(directory) if directory.is_dir() else None
     if config is None:
         raise AdapterError("This Claude session is not connected. Use /workspace:connect.")
+    spec = meta_of(directory).get("tunnel")
+    if spec and transport is None:
+        found = Tunnels(base or home()).status(spec["local_port"])
+        if not (found and found["alive"]):
+            # Never send the token to whatever else may now listen on that port.
+            raise AdapterError("Tunnel is down; run `ws.py tunnel up` (or reconnect).")
     workspace = Workspace(config, transport=transport)
     workspace.config["command"] = f"{shlex.quote(sys.executable)} {shlex.quote(str(SCRIPT))}"
     return workspace, directory
@@ -179,7 +185,7 @@ def tunnel_spec(args, cfg):
     if not target:
         if not args.ssh_user:
             raise AdapterError(
-                "Give --ssh ALIAS_OR_USER@HOST or --ssh-user USER (your existing SSH account)."
+                "A tunnel needs your SSH account: --ssh ALIAS_OR_USER@HOST or --ssh-user USER."
             )
         target = f"{args.ssh_user}@{args.ssh_host or cfg['ssh_host']}"
     return {
@@ -230,9 +236,10 @@ def connect(args, session_id, cwd, *, tunnels=None, base=None):
         url = tunnel_url
     if not url:
         raise AdapterError("Supply --url, or use a connection file that contains the URL.")
-    staging = Path(tempfile.mkdtemp(prefix="stage-", dir=base))
-    (directory.parent).mkdir(mode=0o700, parents=True, exist_ok=True)
+    staging = None
     try:
+        staging = Path(tempfile.mkdtemp(prefix="stage-", dir=base))
+        directory.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         staged = staging / "credentials.json"
         write_private(staged, source, exclusive=True)
         result = prepare(
@@ -253,7 +260,8 @@ def connect(args, session_id, cwd, *, tunnels=None, base=None):
             tunnels.release(owner, port)
         raise
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        if staging:
+            shutil.rmtree(staging, ignore_errors=True)
     return {
         "connected": True,
         "project": result["project_id"],
@@ -282,7 +290,11 @@ def import_config(config_path, session_id, cwd, directory):
     if not Path(cwd).resolve().is_relative_to(config["cwd"]):
         raise AdapterError("This session's folder is outside the adapter's working folder.")
     directory.mkdir(mode=0o700, parents=True)
-    write_private(directory / "session.json", {"link": str(path), "tunnel": None})
+    try:
+        write_private(directory / "session.json", {"link": str(path), "tunnel": None})
+    except BaseException:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
     return {"connected": True, "imported": True, "project": config["project_id"]}
 
 
@@ -335,12 +347,18 @@ def inbox(session_id, cwd, *, transport=None, base=None):
         return {"pending": workspace.command("pending", session=session_id, cwd=cwd)}
     except AdapterError as exc:
         if "no pending" in str(exc):
-            return {"pending": None}
+            with workspace.locked():
+                error = workspace.state["error"]
+            return {"pending": None, **({"error": error, "note": "check failed"} if error else {})}
         raise
 
 
 def act(action, session_id, cwd, *, text=None, mentions=(), transport=None, base=None):
     workspace, _ = load(session_id, transport=transport, base=base)
+    if text is not None:
+        token = read_private(workspace.config["credentials"]).get("token", "")
+        if token and token in text:
+            raise AdapterError("Reply text contains the connection credential; refusing to post.")
     return workspace.command(action, session=session_id, cwd=cwd, text=text, mentions=mentions)
 
 
@@ -349,7 +367,10 @@ def disconnect(session_id, *, transport=None, tunnels=None, base=None):
     directory = session_dir(session_id, base)
     if not directory.is_dir():
         return {"connected": False}
-    meta = meta_of(directory)
+    try:
+        meta = meta_of(directory)
+    except ValueError:
+        meta = {}
     released = False
     try:
         workspace, _ = load(session_id, transport=transport, base=base)
@@ -453,7 +474,12 @@ def main(argv=None):
                 text = None
                 if args.action == "reply":
                     if args.text_file:
-                        with Path(args.text_file).open(encoding="utf-8") as stream:
+                        reply_path = Path(args.text_file).expanduser().resolve()
+                        if reply_path.is_relative_to(home().resolve()):
+                            raise AdapterError(
+                                "Reply text must not come from the plugin's private store."
+                            )
+                        with reply_path.open(encoding="utf-8") as stream:
                             text = stream.read(20001)
                     else:
                         text = sys.stdin.read(20001)

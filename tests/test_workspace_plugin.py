@@ -421,3 +421,50 @@ def test_tunnel_with_conflicting_url_is_refused_and_released(env, server, tun):
             SID, str(work), tunnels=t, base=base,
         )  # fmt: skip
     assert t.read(port) is None and killed == [4242]
+
+
+def test_ssh_options_cannot_weaken_host_keys_or_run_commands():
+    for bad in (
+        "StrictHostKeyChecking=no", "UserKnownHostsFile=/dev/null", "ProxyCommand=sh${IFS}-c",
+        "LocalCommand=id", "PermitLocalCommand=yes", "RemoteForward=9000:127.0.0.1:22",
+    ):  # fmt: skip
+        with pytest.raises(ws_tunnel.TunnelError):
+            ws_tunnel.build_argv("h", 8002, "127.0.0.1", 18000, options=[bad])
+    argv = ws_tunnel.build_argv("h", 8002, "127.0.0.1", 18000, options=["ConnectTimeout=5"])
+    assert "ConnectTimeout=5" in argv
+
+
+def test_token_never_sent_when_tunnel_is_dead(env, server, tun):
+    base, work, cred = env
+    t, port, live, killed = tun
+    _, srv_port = server.rsplit(":", 1)
+    t.dir = Path(base) / "tunnels"
+    t.dir.mkdir(parents=True, exist_ok=True)
+    wsplugin.connect(
+        args(credentials=str(cred), ssh="alice@h", local_port=int(srv_port)),
+        SID, str(work), tunnels=t, base=base,
+    )  # fmt: skip
+    live.clear()  # ssh died; the stub (a stand-in for a stranger) still answers on the port
+    n = len(Stub.log)
+    with pytest.raises(adapter.AdapterError, match="Tunnel is down"):
+        wsplugin.load(SID, base=base)
+    assert wsplugin.run_hook(hook_payload(work, "SessionStart"), base=base) is None
+    assert len(Stub.log) == n
+
+
+def test_reply_refuses_credential_text_and_inbox_surfaces_errors(env, server):
+    base, work, cred = env
+    from test_claude_workspace import Fake
+
+    wsplugin.connect(args(credentials=str(cred), url=server), SID, str(work), base=base)
+    fake = Fake()
+    d = wsplugin.session_dir(SID, base)
+    secret = adapter.read_private(d / "credentials.json")["token"]
+    fake.events = []
+    with pytest.raises(adapter.AdapterError, match="credential"):
+        wsplugin.act("reply", SID, work, text=f"x {secret}", transport=fake, base=base)
+    state = adapter.read_private(d / "checkpoint.json")
+    adapter.write_private(d / "checkpoint.json", {**state, "last_poll": 0})
+    fake.denied = True  # claim fails -> hook records the error
+    out = wsplugin.inbox(SID, work, transport=fake, base=base)
+    assert out["pending"] is None and out["error"]

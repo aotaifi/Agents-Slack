@@ -21,7 +21,12 @@ import time
 from pathlib import Path
 
 TARGET_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._@:\[\]%-]*$")
-OPTION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*=[^\s]+$")
+OPTION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*=[A-Za-z0-9_./@:,~+-]+$")
+# Only options that cannot run commands, weaken host-key checks or add forwards.
+ALLOWED_OPTIONS = {
+    "connecttimeout", "connectionattempts", "identityfile", "identitiesonly", "user",
+    "serveraliveinterval", "serveralivecountmax", "addressfamily", "proxyjump", "port",
+}  # fmt: skip
 
 
 class TunnelError(ValueError):
@@ -51,8 +56,12 @@ def build_argv(target, local_port, remote_host, remote_port, *, ssh_port=None, o
         "-L", f"127.0.0.1:{local_port}:{remote_host}:{remote_port}",
     ]  # fmt: skip
     for option in options:
-        if not OPTION_RE.match(option):
-            raise TunnelError("--ssh-option must look like Key=value.")
+        if not OPTION_RE.match(option) or option.split("=")[0].lower() not in ALLOWED_OPTIONS:
+            raise TunnelError(
+                "--ssh-option must be Key=value with a key from: "
+                + ", ".join(sorted(ALLOWED_OPTIONS))
+                + ". Host-key and command options are never accepted."
+            )
         argv += ["-o", option]
     if ssh_port is not None:
         argv += ["-p", str(ssh_port)]
@@ -182,6 +191,9 @@ class Tunnels:
             if process.poll() is not None:
                 raise TunnelError(self._explain(errors, process.returncode))
             if port_accepts(port):
+                time.sleep(0.2)
+                if process.poll() is not None:  # someone else answered; our ssh failed to bind
+                    raise TunnelError(self._explain(errors, process.returncode))
                 self.write(
                     {
                         "local_port": port, "pid": process.pid, "argv": argv, "target": target,
@@ -193,8 +205,9 @@ class Tunnels:
                 return port
             time.sleep(0.1)
         self._terminate(process.pid)
+        errors.unlink(missing_ok=True)
         raise TunnelError(
-            "SSH did not open the forward in time. Run the printed ssh command yourself "
+            "SSH did not open the forward in time. Run `ssh TARGET` yourself "
             "(for example with `! ssh ...`) to finish any prompt, then retry."
         )
 

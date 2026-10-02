@@ -9,5 +9,7 @@ Connect this conversation. The session id comes from Claude, never from the fold
 
 1. If no credential path was given in `$ARGUMENTS`, run
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ws.py" discover` (lists downloaded connection files, never tokens) and ask the user which one, whether to open an SSH tunnel (their SSH alias or account) and the workspace URL if no tunnel is used.
-2. Run: `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ws.py" --session "${CLAUDE_SESSION_ID}" connect $ARGUMENTS` (add the user's choices as flags; see `connect --help`).
-3. Report only the JSON result (project, URL, tunnel port). Never print, echo or pass a token. If SSH needs a passphrase or an unknown host key, tell the user to run the printed ssh command themselves with the `!` prefix, then retry.
+2. Run: `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/ws.py" --session "${CLAUDE_SESSION_ID}" connect $ARGUMENTS` (add the user's choices as flags, using only flags listed in `connect --help`).
+3. Report only the JSON result (project, URL, tunnel port). Never print, echo or pass a token. If SSH needs a passphrase or an unknown host key, tell the user to run `ssh TARGET` themselves with the `!` prefix (accept the host key or finish the prompt), then retry.
+
+Shell-quote every argument you pass (paths with spaces, `;`, `$` must not be interpreted). Do not add flags the user did not ask for or choose; never add `--ssh-option` on your own.
