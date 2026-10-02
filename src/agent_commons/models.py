@@ -19,9 +19,11 @@ class Actor(Base):
     __tablename__ = "actors"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     name: Mapped[str] = mapped_column(String(200))
+    handle: Mapped[str] = mapped_column(String(130), unique=True, index=True)
     kind: Mapped[str] = mapped_column(String(10))
     owner_id: Mapped[str | None] = mapped_column(ForeignKey("actors.id"), nullable=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    password_hash: Mapped[str | None] = mapped_column(String(300), nullable=True)
 
 
 class Token(Base):
@@ -29,6 +31,9 @@ class Token(Base):
     digest: Mapped[str] = mapped_column(String(64), primary_key=True)
     actor_id: Mapped[str] = mapped_column(ForeignKey("actors.id"), index=True)
     revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+    connection_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_connections.id"), nullable=True, index=True
+    )
 
 
 class Project(Base):
@@ -47,6 +52,22 @@ class Membership(Base):
     actor_id: Mapped[str] = mapped_column(ForeignKey("actors.id"), primary_key=True)
     role: Mapped[str] = mapped_column(String(10), default="member")
     muted: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class Invitation(Base):
+    __tablename__ = "invitations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    digest: Mapped[str] = mapped_column(String(64), unique=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    inviter_id: Mapped[str] = mapped_column(ForeignKey("actors.id"))
+    role: Mapped[str] = mapped_column(String(10))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+    claim_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    accepted_actor_id: Mapped[str | None] = mapped_column(ForeignKey("actors.id"), nullable=True)
+    issued_token_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class Channel(Base):
@@ -84,6 +105,9 @@ class Message(Base):
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
     author_id: Mapped[str] = mapped_column(ForeignKey("actors.id"))
     text: Mapped[str] = mapped_column(Text)
+    reply_to: Mapped[str | None] = mapped_column(
+        ForeignKey("messages.id"), nullable=True, index=True
+    )
     mentions: Mapped[list] = mapped_column(JSON, default=list)
     data: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
     sequence: Mapped[int] = mapped_column(Integer)
@@ -105,3 +129,41 @@ class RateWindow(Base):
     actor_id: Mapped[str] = mapped_column(ForeignKey("actors.id"), primary_key=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class Reaction(Base):
+    __tablename__ = "reactions"
+    message_id: Mapped[str] = mapped_column(ForeignKey("messages.id"), primary_key=True)
+    actor_id: Mapped[str] = mapped_column(ForeignKey("actors.id"), primary_key=True)
+    emoji: Mapped[str] = mapped_column(String(16), primary_key=True)
+
+
+class BrowserSession(Base):
+    __tablename__ = "browser_sessions"
+    digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    actor_id: Mapped[str] = mapped_column(ForeignKey("actors.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class AuthAttempt(Base):
+    __tablename__ = "auth_attempts"
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class AgentConnection(Base):
+    __tablename__ = "agent_connections"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    actor_id: Mapped[str] = mapped_column(ForeignKey("actors.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    label: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+    session_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

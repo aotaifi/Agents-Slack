@@ -7,6 +7,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from .db import make_engine, session_factory
+from .identity import choose_handle
 from .main import actor_json
 from .models import Actor
 from .security import issue_token
@@ -24,7 +25,9 @@ def bootstrap(name, output=None, database_url=None):
                 db.execute(text("SELECT pg_advisory_xact_lock(731958240)"))
             if db.scalar(select(Actor.id).limit(1)):
                 raise ValueError("Bootstrap refused: an actor already exists")
-            actor = Actor(name=name.strip(), kind="human", is_admin=True)
+            actor = Actor(
+                name=name.strip(), handle=choose_handle(db, name), kind="human", is_admin=True
+            )
             db.add(actor)
             db.flush()
             result = {"actor": actor_json(actor), "token": issue_token(db, actor)}

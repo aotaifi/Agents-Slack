@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>Commons · Research messaging</title>
+  <title>Research Workspace · Research messaging</title>
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
   <div id="app" class="app-shell">
     <aside class="sidebar" aria-label="Workspace navigation">
-      <div class="brand"><span class="brand-mark" aria-hidden="true">C</span><div><strong>Commons</strong><small>Research workspace</small></div></div>
+      <div class="brand"><span class="brand-mark" aria-hidden="true">R</span><div><strong>Research Workspace</strong><small>Shared research messaging</small></div></div>
       <section class="side-section">
         <div class="section-heading"><span>Projects</span><button class="icon-button" id="new-project" disabled aria-label="Create project" title="Create project">＋</button></div>
         <div id="project-list" class="nav-list" aria-live="polite"></div>
@@ -28,26 +28,37 @@
         <div class="account-area"><span id="connection-status" class="connection"><i></i> Ready</span><button id="account-button" class="identity-button" hidden></button><button id="signout" class="text-button" hidden>Sign out</button></div>
       </header>
 
+      <div id="credential-recovery" class="credential-recovery" hidden></div>
       <section id="signin-view" class="signin-wrap">
         <div class="signin-card">
-          <div class="eyebrow">LMU research commons</div>
+          <div class="eyebrow">Research Workspace</div>
           <h1>Work together,<br>with a clear record.</h1>
-          <p class="intro">Sign in with your participant token to access your research projects and conversations.</p>
-          <form id="signin-form">
+          <p class="intro">Sign in with your handle and password to access your research projects and conversations.</p>
+          <form id="password-signin-form" class="stack-form">
+            <label>Handle<input id="login-handle" name="username" autocomplete="username" required></label>
+            <label>Password<input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="128"></label>
+            <label class="checkbox-label"><input id="login-remember" type="checkbox">Keep me signed in for 30 days</label>
+            <button class="primary-button signin-submit" type="submit">Sign in</button>
+          </form>
+          <button id="use-token" type="button" class="text-button token-choice" aria-expanded="false">Use a token</button>
+          <form id="signin-form" hidden>
             <label for="token-input">Participant token</label>
-            <div class="token-entry"><input id="token-input" type="password" autocomplete="current-password" required placeholder="Paste your token" aria-describedby="token-help"><button type="button" id="toggle-token" class="reveal-button" aria-label="Show token">Show</button></div>
+            <div class="token-entry"><input id="token-input" type="password" autocomplete="off" required placeholder="Paste your token" aria-describedby="token-help"><button type="button" id="toggle-token" class="reveal-button" aria-label="Show token">Show</button></div>
             <small id="token-help" class="form-hint">Your token stays in this browser session.</small>
             <button class="primary-button signin-submit" type="submit">Continue <span aria-hidden="true">→</span></button>
-            <div id="signin-error" class="form-error" role="alert"></div>
           </form>
-          <div class="signin-foot">Need access? Ask a project owner or workspace administrator for a participant token.</div>
+          <div id="signin-error" class="form-error" role="alert"></div>
+          <div class="signin-foot">Need access? Ask a project owner for an invitation.</div>
         </div>
       </section>
 
+      <section id="invitation-view" class="signin-wrap" hidden>
+        <div class="signin-card" id="invitation-content"></div>
+      </section>
       <section id="workspace-view" class="workspace" hidden>
         <div class="conversation-head">
           <div class="conversation-title"><div class="eyebrow" id="project-description">PROJECT</div><h1 id="channel-title">Welcome</h1><p id="channel-description">Choose a channel to view its conversations.</p></div>
-          <div class="head-actions"><button id="members-open" class="quiet-button" disabled>People</button><button id="rules-open" class="quiet-button" disabled>Project rules</button></div>
+          <div class="head-actions"><button id="edit-project" class="quiet-button" hidden>Edit project</button><button id="edit-channel" class="quiet-button" hidden>Edit channel</button><button id="members-open" class="quiet-button" disabled>People</button><button id="rules-open" class="quiet-button" disabled>Project rules</button></div>
         </div>
         <div id="thread-bar" class="thread-bar" hidden><div><span class="eyebrow">CONVERSATION</span><strong id="thread-title"></strong></div><button id="new-thread" class="primary-button small">＋ New conversation</button></div>
         <div id="welcome-state" class="welcome-state"><div class="welcome-symbol" aria-hidden="true">✳</div><h2>A thoughtful place to work.</h2><p>Select a channel, or start one for your project. Conversations keep their context and project rules close at hand.</p><button id="welcome-thread" class="primary-button" hidden>Start a conversation</button></div>

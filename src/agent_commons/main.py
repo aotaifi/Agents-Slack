@@ -1,43 +1,92 @@
 import hashlib
+import hmac
 import json
 import os
-from datetime import timezone
+import secrets
+from datetime import timedelta, timezone
 from pathlib import Path
+from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select, text, update
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from .db import make_engine, session_factory
+from .identity import choose_handle
+from .invitation_email import MailUnavailable, email_enabled, invitation_message, submit_invitation
 from .models import (
     Actor,
+    AgentConnection,
+    AuthAttempt,
+    BrowserSession,
     Channel,
     Event,
     Idempotency,
+    Invitation,
     Membership,
     Message,
     Project,
     RateWindow,
+    Reaction,
     Thread,
     Token,
     now,
 )
 from .schemas import (
     ActorInput,
+    AgentConnectionInput,
+    AgentSessionInput,
+    InvitationAccept,
+    InvitationCode,
+    InvitationEmail,
+    InvitationInput,
+    LoginInput,
     MemberInput,
+    MemberRoleInput,
     MessageInput,
     MuteInput,
+    Named,
+    PasswordInput,
     ProjectInput,
+    ReactionInput,
     RulesInput,
     ThreadInput,
 )
-from .security import digest, issue_token
+from .security import credential_lock_key, digest, hash_password, issue_token, verify_password
 
 
 def actor_json(a):
-    return {k: getattr(a, k) for k in ("id", "name", "kind", "owner_id", "is_admin")}
+    db = object_session(a)
+    owner = db.get(Actor, a.owner_id) if db and a.owner_id else None
+    return {
+        **{k: getattr(a, k) for k in ("id", "name", "handle", "kind", "owner_id", "is_admin")},
+        "owner": {k: getattr(owner, k) for k in ("id", "name", "handle")} if owner else None,
+    }
+
+
+def self_actor_json(a):
+    return {**actor_json(a), "has_password": a.password_hash is not None}
+
+
+def reaction_actor(a):
+    return {k: getattr(a, k) for k in ("id", "name", "handle", "kind")}
+
+
+def reactions_json(db, message_id):
+    groups = {}
+    for reaction, actor in db.execute(
+        select(Reaction, Actor)
+        .join(Actor, Actor.id == Reaction.actor_id)
+        .where(Reaction.message_id == message_id)
+        .order_by(Reaction.emoji, Actor.handle, Actor.id)
+    ):
+        groups.setdefault(reaction.emoji, []).append(reaction_actor(actor))
+    return [
+        {"emoji": emoji, "actors": actors, "count": len(actors)} for emoji, actors in groups.items()
+    ]
 
 
 def project_json(p):
@@ -48,8 +97,12 @@ def channel_json(c):
     return {k: getattr(c, k) for k in ("id", "project_id", "name", "description")}
 
 
+def utc(value):
+    return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
 def timestamp(value):
-    return value.replace(tzinfo=timezone.utc).isoformat()
+    return utc(value).isoformat()
 
 
 def thread_json(t):
@@ -71,6 +124,11 @@ def message_json(db, m):
         },
         "author": actor_json(db.get(Actor, m.author_id)),
         "metadata": m.data,
+        "reply_to": m.reply_to,
+        "reactions": reactions_json(db, m.id),
+        "reply_count": db.scalar(
+            select(func.count()).select_from(Message).where(Message.reply_to == m.id)
+        ),
         "created_at": timestamp(m.created_at),
     }
 
@@ -83,12 +141,14 @@ def event_json(e):
 
 
 def create_app(database_url: str | None = None):
-    app = FastAPI(title="Agent Commons", version="0.1.0")
+    app = FastAPI(title="Research Workspace", version="0.1.0")
     engine = make_engine(database_url)
     factory = session_factory(engine)
     app.state.engine = engine
     app.state.session_factory = factory
     app.state.posting_limit = int(os.environ.get("POSTING_RATE_LIMIT", "60"))
+    app.state.auth_account_limit = 5
+    app.state.auth_ip_limit = 100
 
     def session(request: Request):
         with factory() as db:
@@ -106,29 +166,169 @@ def create_app(database_url: str | None = None):
                 db.rollback()
                 raise
 
+    def same_origin(request, required=True):
+        origin = request.headers.get("origin")
+        expected = f"{request.url.scheme}://{request.url.netloc}"
+        if (origin is None and required) or (origin is not None and origin != expected):
+            raise HTTPException(403, "Same-origin request required")
+
+    def resolve_identity(request, authorization, db):
+        # Explicit bearer credentials never silently fall back to another identity.
+        connection = None
+        if authorization:
+            if not authorization.startswith("Bearer ") or len(authorization) > 512:
+                raise HTTPException(401, "Invalid or revoked token")
+            token = db.get(Token, digest(authorization[7:]), populate_existing=True)
+            if token is None or token.revoked:
+                raise HTTPException(401, "Invalid or revoked token")
+            actor = db.get(Actor, token.actor_id)
+            if token.connection_id:
+                connection = db.get(AgentConnection, token.connection_id, populate_existing=True)
+                if (
+                    connection is None
+                    or connection.revoked
+                    or actor is None
+                    or actor.kind != "agent"
+                    or connection.actor_id != actor.id
+                ):
+                    raise HTTPException(401, "Invalid or revoked connection")
+        else:
+            raw = request.cookies.get("workspace_session")
+            if not raw or len(raw) > 128:
+                raise HTTPException(401, "Sign in required")
+            credential = db.get(BrowserSession, digest(raw), populate_existing=True)
+            if credential is None or credential.revoked or utc(credential.expires_at) <= now():
+                raise HTTPException(401, "Session expired or revoked")
+            actor = db.get(Actor, credential.actor_id)
+            if actor is None or actor.kind != "human":
+                raise HTTPException(401, "Invalid session")
+            if request.method not in {"GET", "HEAD", "OPTIONS"}:
+                same_origin(request)
+        # These attributes exist only on this request's ORM instance, never JSON.
+        actor._workspace_connection = connection
+        actor._workspace_session_id = request.headers.get("x-workspace-session")
+        actor._workspace_mutating = request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        request.state.actor_handle = actor.handle
+        return actor
+
     def authenticated(
+        request: Request,
         authorization: str | None = Header(default=None),
         db: Session = Depends(session, scope="function"),
     ):
-        if not authorization or not authorization.startswith("Bearer "):
-            raise HTTPException(401, "Bearer token required")
-        token = db.get(Token, digest(authorization[7:]))
-        if token is None or token.revoked:
-            raise HTTPException(401, "Invalid or revoked token")
-        return db.get(Actor, token.actor_id)
+        return resolve_identity(request, authorization, db)
+
+    def consume_auth_rate(db, request, handle):
+        # Persist attempts before a failure is raised; the request rollback must not
+        # erase brute-force counters. This short lock is released before scrypt.
+        if engine.dialect.name == "postgresql":
+            db.execute(text("SELECT pg_advisory_xact_lock(731958241)"))
+        current = now()
+        ip = request.client.host if request.client else "unknown"
+        windows = []
+        for label, value, limit in (
+            ("account", handle.lower(), app.state.auth_account_limit),
+            ("ip", ip, app.state.auth_ip_limit),
+        ):
+            key = digest(label + ":" + value)
+            window = db.get(AuthAttempt, key)
+            if window is None:
+                window = AuthAttempt(key=key, started_at=current, count=0)
+                db.add(window)
+            elapsed = (current - utc(window.started_at)).total_seconds()
+            if elapsed >= 60:
+                window.started_at, window.count = current, 0
+            if window.count >= limit:
+                db.commit()
+                raise HTTPException(
+                    429,
+                    "Authentication rate limit exceeded",
+                    headers={"Retry-After": str(max(1, int(60 - elapsed) + 1))},
+                )
+            windows.append(window)
+        for window in windows:
+            window.count += 1
+        db.commit()
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request, error):
+        # Pydantic includes rejected input by default, including password strings.
+        # Keep the useful location/message while dropping values and contexts.
+        if request.url.path in {"/v1/auth/login", "/v1/auth/password"}:
+            try:
+                same_origin(
+                    request,
+                    required=(
+                        request.url.path == "/v1/auth/login"
+                        or not request.headers.get("authorization")
+                    ),
+                )
+            except HTTPException as forbidden:
+                return JSONResponse({"detail": forbidden.detail}, status_code=forbidden.status_code)
+            body = error.body if isinstance(error.body, dict) else {}
+            handle = body.get("handle") or getattr(request.state, "actor_handle", "invalid")
+            handle = handle[:130] if isinstance(handle, str) else "invalid"
+            with factory() as db:
+                if engine.dialect.name == "sqlite":
+                    db.execute(text("BEGIN IMMEDIATE"))
+                try:
+                    consume_auth_rate(db, request, handle)
+                except HTTPException as limited:
+                    return JSONResponse(
+                        {"detail": limited.detail},
+                        status_code=limited.status_code,
+                        headers=limited.headers,
+                    )
+        errors = [
+            {k: item[k] for k in ("type", "loc", "msg") if k in item} for item in error.errors()
+        ]
+        return JSONResponse({"detail": errors}, status_code=422)
+
+    def lock_auth_actor(db, actor_id):
+        if engine.dialect.name == "sqlite":
+            db.rollback()
+            db.execute(text("BEGIN IMMEDIATE"))
+        return db.scalar(
+            select(Actor)
+            .where(Actor.id == actor_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+
+    def issue_browser_session(db, actor, response, request, remember):
+        seconds = 30 * 24 * 60 * 60 if remember else 12 * 60 * 60
+        raw = secrets.token_urlsafe(32)
+        db.add(
+            BrowserSession(
+                digest=digest(raw), actor_id=actor.id, expires_at=now() + timedelta(seconds=seconds)
+            )
+        )
+        response.set_cookie(
+            "workspace_session",
+            raw,
+            max_age=seconds if remember else None,
+            path="/v1",
+            httponly=True,
+            secure=request.url.scheme == "https",
+            samesite="strict",
+        )
 
     def human(a):
         if a.kind != "human":
             raise HTTPException(403, "Human action required")
 
-    def project_access(db, a, project_id, write=False, owner=False):
+    def project_access(db, a, project_id, write=False, owner=False, lease=True, lock=False):
+        connection = getattr(a, "_workspace_connection", None)
+        if connection is not None and connection.project_id != project_id:
+            raise HTTPException(404, "Project not found")
         # The project lock is held until the entire request transaction commits.
         # Under PostgreSQL READ COMMITTED, later writers see committed cursor/key state.
         query = select(Project).where(Project.id == project_id)
-        if write or owner:
+        mutating_connection = connection is not None and getattr(a, "_workspace_mutating", False)
+        if write or owner or lock or mutating_connection:
             query = query.with_for_update()
         p = db.scalar(query.execution_options(populate_existing=True))
-        m = db.get(Membership, (project_id, a.id))
+        m = db.get(Membership, (project_id, a.id), populate_existing=True)
         if p is None or m is None:
             raise HTTPException(404, "Project not found")
         if owner:
@@ -137,6 +337,21 @@ def create_app(database_url: str | None = None):
                 raise HTTPException(403, "Project owner required")
         if write and m.muted:
             raise HTTPException(403, "Participant is muted")
+        if connection is not None:
+            db.refresh(connection)
+            if connection.revoked:
+                raise HTTPException(401, "Invalid or revoked connection")
+            if lease and mutating_connection:
+                session_id = getattr(a, "_workspace_session_id", None)
+                if (
+                    not session_id
+                    or len(session_id) > 200
+                    or not connection.session_digest
+                    or not hmac.compare_digest(connection.session_digest, digest(session_id))
+                    or connection.lease_expires_at is None
+                    or utc(connection.lease_expires_at) <= now()
+                ):
+                    raise HTTPException(403, "Claim an active lease for this session first")
         return p
 
     def resource(db, a, model, resource_id, write=False):
@@ -153,6 +368,23 @@ def create_app(database_url: str | None = None):
         db.flush()
         return e
 
+    def enforce_rate(db, p, a, limit=None):
+        current = now()
+        window = db.get(RateWindow, (p.id, a.id))
+        if window is None:
+            window = RateWindow(project_id=p.id, actor_id=a.id, started_at=current, count=0)
+            db.add(window)
+        elapsed = (current - utc(window.started_at)).total_seconds()
+        if elapsed >= 60:
+            window.started_at, window.count = current, 0
+        elif window.count >= min(app.state.posting_limit, limit or app.state.posting_limit):
+            raise HTTPException(
+                429,
+                "Posting rate limit exceeded",
+                headers={"Retry-After": str(max(1, int(60 - elapsed) + 1))},
+            )
+        window.count += 1
+
     @app.get("/health")
     def health(db: Session = Depends(session, scope="function")):
         try:
@@ -161,9 +393,542 @@ def create_app(database_url: str | None = None):
             raise HTTPException(503, "Database unavailable") from None
         return {"status": "ok"}
 
+    def lock_actor_credentials(db, actor_ids):
+        if engine.dialect.name == "postgresql":
+            for actor_id in sorted(set(actor_ids)):
+                db.execute(
+                    text("SELECT pg_advisory_xact_lock(:key)"),
+                    {"key": credential_lock_key(actor_id)},
+                )
+
+    def connection_json(db, connection):
+        actor = db.get(Actor, connection.actor_id)
+        project = db.get(Project, connection.project_id)
+        return {
+            "id": connection.id,
+            "actor": actor_json(actor),
+            "project": {"id": project.id, "name": project.name},
+            "label": connection.label,
+            "created_at": timestamp(connection.created_at),
+            "revoked": connection.revoked,
+            "bound": connection.session_digest is not None,
+            "active": (
+                not connection.revoked
+                and connection.lease_expires_at is not None
+                and utc(connection.lease_expires_at) > now()
+            ),
+            "lease_expires_at": timestamp(connection.lease_expires_at)
+            if connection.lease_expires_at
+            else None,
+            "last_seen_at": timestamp(connection.last_seen_at) if connection.last_seen_at else None,
+        }
+
+    def visible_connection(db, a, connection_id, *, own_token=False, lock=False, write=False):
+        connection = db.get(AgentConnection, connection_id)
+        scoped = getattr(a, "_workspace_connection", None)
+        if connection is None:
+            raise HTTPException(404, "Connection not found")
+        if own_token:
+            if scoped is None or scoped.id != connection.id:
+                raise HTTPException(403, "Use this connection's credential")
+        elif a.kind == "human":
+            if db.get(Actor, connection.actor_id).owner_id != a.id:
+                raise HTTPException(404, "Connection not found")
+        elif scoped is None or scoped.id != connection.id:
+            raise HTTPException(404, "Connection not found")
+        project_access(db, a, connection.project_id, write=write, lock=lock, lease=False)
+        db.refresh(connection)
+        return connection
+
+    @app.post("/v1/agent-connections", status_code=201)
+    def create_connection(
+        body: AgentConnectionInput,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        if getattr(a, "_workspace_connection", None) is not None:
+            raise HTTPException(403, "Connection credentials cannot create connections")
+        if a.kind == "human":
+            if body.actor_id is None:
+                raise HTTPException(422, "Choose one of your agents")
+            actor = db.get(Actor, str(body.actor_id))
+            if actor is None or actor.kind != "agent" or actor.owner_id != a.id:
+                raise HTTPException(403, "Choose one of your own agents")
+        else:
+            if body.actor_id is not None and str(body.actor_id) != a.id:
+                raise HTTPException(403, "Agents can create connections only for themselves")
+            actor = a
+        lock_actor_credentials(db, [a.id, actor.id])
+        # Actor revocation uses these same locks. The source may have been revoked
+        # while this request waited, and must not mint a replacement credential.
+        resolve_identity(request, authorization, db)
+        project_id = str(body.project_id)
+        project_access(db, a, project_id, write=True)
+        membership = db.get(Membership, (project_id, actor.id), populate_existing=True)
+        if membership is None:
+            raise HTTPException(404, "Agent is not a project member")
+        if membership.muted:
+            raise HTTPException(403, "Participant is muted")
+        connection = AgentConnection(actor_id=actor.id, project_id=project_id, label=body.label)
+        db.add(connection)
+        db.flush()
+        token = issue_token(db, actor, connection_id=connection.id)
+        return {"connection": connection_json(db, connection), "token": token}
+
+    @app.get("/v1/agent-connections")
+    def connections(
+        project_id: UUID | None = None,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        human(a)
+        query = (
+            select(AgentConnection)
+            .join(Actor, Actor.id == AgentConnection.actor_id)
+            .join(
+                Membership,
+                (Membership.project_id == AgentConnection.project_id)
+                & (Membership.actor_id == a.id),
+            )
+            .where(Actor.owner_id == a.id)
+            .order_by(AgentConnection.created_at.desc(), AgentConnection.id)
+        )
+        if project_id is not None:
+            query = query.where(AgentConnection.project_id == str(project_id))
+        return {"items": [connection_json(db, connection) for connection in db.scalars(query)]}
+
+    @app.get("/v1/agent-connections/{connection_id}")
+    def get_connection(
+        connection_id: str,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        return connection_json(db, visible_connection(db, a, connection_id))
+
+    @app.delete("/v1/agent-connections/{connection_id}", status_code=204)
+    def revoke_connection(
+        connection_id: str,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        human(a)
+        connection = visible_connection(db, a, connection_id, lock=True)
+        connection.revoked, connection.lease_expires_at = True, None
+        db.execute(update(Token).where(Token.connection_id == connection.id).values(revoked=True))
+        return Response(status_code=204)
+
+    @app.post("/v1/agent-connections/{connection_id}/claim")
+    def claim_connection(
+        connection_id: str,
+        body: AgentSessionInput,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        connection = visible_connection(db, a, connection_id, own_token=True, lock=True, write=True)
+        supplied = digest(body.session_id)
+        if connection.session_digest and not hmac.compare_digest(
+            connection.session_digest, supplied
+        ):
+            raise HTTPException(409, "Connection is permanently bound to a different session")
+        current = now()
+        competing = db.scalar(
+            select(AgentConnection.id)
+            .where(
+                AgentConnection.actor_id == a.id,
+                AgentConnection.project_id == connection.project_id,
+                AgentConnection.id != connection.id,
+                AgentConnection.revoked.is_(False),
+                AgentConnection.lease_expires_at > current,
+            )
+            .limit(1)
+        )
+        if competing is not None:
+            raise HTTPException(409, "This agent already has an active connection in the project")
+        connection.session_digest = supplied
+        connection.lease_expires_at = current + timedelta(seconds=300)
+        connection.last_seen_at = current
+        db.flush()
+        return {"connection": connection_json(db, connection)}
+
+    @app.post("/v1/agent-connections/{connection_id}/release")
+    def release_connection(
+        connection_id: str,
+        body: AgentSessionInput,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        connection = visible_connection(db, a, connection_id, own_token=True, lock=True)
+        if not connection.session_digest or not hmac.compare_digest(
+            connection.session_digest, digest(body.session_id)
+        ):
+            raise HTTPException(409, "Connection is permanently bound to a different session")
+        connection.lease_expires_at = None
+        db.flush()
+        return {"connection": connection_json(db, connection)}
+
     @app.get("/v1/me")
-    def me(a=Depends(authenticated, scope="function")):
-        return actor_json(a)
+    def me(
+        a=Depends(authenticated, scope="function"), db: Session = Depends(session, scope="function")
+    ):
+        result = self_actor_json(a)
+        connection = getattr(a, "_workspace_connection", None)
+        if connection is not None:
+            project_access(db, a, connection.project_id)
+            result["connection"] = connection_json(db, connection)
+        return result
+
+    @app.patch("/v1/me")
+    def edit_profile(
+        body: Named,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        human(a)
+        a.name = body.name
+        db.flush()
+        return self_actor_json(a)
+
+    @app.post("/v1/auth/login")
+    def login(
+        body: LoginInput,
+        request: Request,
+        response: Response,
+        db: Session = Depends(session, scope="function"),
+    ):
+        same_origin(request)
+        consume_auth_rate(db, request, body.handle)
+        actor = db.scalar(select(Actor).where(Actor.handle == body.handle))
+        previous_hash = actor.password_hash if actor and actor.kind == "human" else None
+        valid = verify_password(body.password, previous_hash)
+        if not valid:
+            raise HTTPException(401, "Invalid handle or password")
+        actor = lock_auth_actor(db, actor.id)
+        # Login cannot mint a session using a password revoked/changed during scrypt.
+        if actor.password_hash != previous_hash:
+            raise HTTPException(401, "Invalid handle or password")
+        issue_browser_session(db, actor, response, request, body.remember)
+        return {"actor": self_actor_json(actor)}
+
+    @app.post("/v1/auth/password")
+    def set_password(
+        body: PasswordInput,
+        request: Request,
+        response: Response,
+        authorization: str | None = Header(default=None),
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        human(a)
+        same_origin(request, required=not bool(authorization))
+        actor_id, handle = a.id, a.handle
+        consume_auth_rate(db, request, handle)
+        db.refresh(a)
+        previous_hash = a.password_hash
+        if previous_hash and not verify_password(body.current_password or "", previous_hash):
+            raise HTTPException(401, "Current password is incorrect")
+        new_hash = hash_password(body.password)
+        actor = lock_auth_actor(db, actor_id)
+        resolve_identity(request, authorization, db)
+        if actor.password_hash != previous_hash:
+            raise HTTPException(409, "Password changed during request; retry")
+        actor.password_hash = new_hash
+        db.execute(
+            update(BrowserSession).where(BrowserSession.actor_id == actor.id).values(revoked=True)
+        )
+        issue_browser_session(db, actor, response, request, body.remember)
+        return {"actor": self_actor_json(actor)}
+
+    @app.post("/v1/auth/logout")
+    def logout(
+        request: Request, response: Response, db: Session = Depends(session, scope="function")
+    ):
+        same_origin(request)
+        raw = request.cookies.get("workspace_session")
+        if raw and len(raw) <= 128:
+            credential = db.get(BrowserSession, digest(raw))
+            if credential:
+                credential.revoked = True
+        response.delete_cookie(
+            "workspace_session",
+            path="/v1",
+            httponly=True,
+            secure=request.url.scheme == "https",
+            samesite="strict",
+        )
+        return {"status": "ok"}
+
+    @app.get("/v1/connection")
+    def connection():
+        return {
+            "ssh_host": os.environ.get("PILOT_SSH_HOST", ""),
+            "ssh_app_port": int(os.environ.get("PILOT_SSH_APP_PORT", "18000")),
+            "local_port": 8002,
+            "email_enabled": email_enabled(),
+        }
+
+    def invitation_json(invitation):
+        return {
+            "id": invitation.id,
+            "role": invitation.role,
+            "created_at": timestamp(invitation.created_at),
+            "expires_at": timestamp(invitation.expires_at),
+            "used": invitation.used_at is not None,
+            "revoked": invitation.revoked,
+        }
+
+    def valid_invitation(db, code, lock=False, claim_secret=None):
+        invitation = db.scalar(select(Invitation).where(Invitation.digest == digest(code)))
+        if invitation is None:
+            raise HTTPException(404, "Invitation unavailable")
+        query = select(Project).where(Project.id == invitation.project_id)
+        if lock:
+            query = query.with_for_update()
+        project = db.scalar(query.execution_options(populate_existing=True))
+        # Project writers serialize acceptance, revocation and owner changes. Refresh
+        # after waiting for that lock so a concurrent acceptance cannot use stale state.
+        db.refresh(invitation)
+        inviter = db.get(Membership, (invitation.project_id, invitation.inviter_id))
+        if (
+            project is None
+            or invitation.revoked
+            or utc(invitation.expires_at) <= now()
+            or inviter is None
+            or inviter.role != "owner"
+        ):
+            raise HTTPException(410, "Invitation expired, used, or withdrawn")
+        if invitation.used_at is not None:
+            if (
+                claim_secret is None
+                or invitation.claim_digest is None
+                or not hmac.compare_digest(invitation.claim_digest, digest(claim_secret))
+                or db.get(Membership, (project.id, invitation.accepted_actor_id)) is None
+            ):
+                raise HTTPException(410, "Invitation already accepted")
+            if invitation.issued_token_digest:
+                credential = db.get(Token, invitation.issued_token_digest)
+                if credential is None or credential.revoked:
+                    raise HTTPException(410, "Invitation credential has been revoked")
+        return invitation, project
+
+    def claim_token(body):
+        # Both inputs contain independent 256-bit secrets. A stable keyed token lets
+        # the original browser recover a lost response without storing plaintext or
+        # rotating credentials when concurrent retries arrive in a different order.
+        return hmac.new(body.code.encode(), body.claim_secret.encode(), hashlib.sha256).hexdigest()
+
+    @app.post("/v1/projects/{project_id}/invitations", status_code=201)
+    def create_invitation(
+        project_id: str,
+        body: InvitationInput,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        project_access(db, a, project_id, owner=True)
+        code = secrets.token_urlsafe(32)
+        invitation = Invitation(
+            digest=digest(code),
+            project_id=project_id,
+            inviter_id=a.id,
+            role=body.role,
+            expires_at=now() + timedelta(hours=body.expires_in_hours),
+        )
+        db.add(invitation)
+        db.flush()
+        return {**invitation_json(invitation), "code": code}
+
+    @app.post("/v1/projects/{project_id}/invitations/{invitation_id}/email", status_code=202)
+    def email_invitation(
+        project_id: str,
+        invitation_id: str,
+        body: InvitationEmail,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        project = project_access(db, a, project_id, owner=True)
+        invitation, _ = valid_invitation(db, body.code)
+        if invitation.project_id != project_id or invitation.id != invitation_id:
+            raise HTTPException(404, "Invitation not found")
+        if not email_enabled():
+            raise HTTPException(503, "Email sending is not configured; copy the invitation instead")
+        enforce_rate(db, project, a, limit=5)
+        try:
+            message = invitation_message(
+                project.name,
+                invitation.role,
+                utc(invitation.expires_at),
+                body.code,
+                body.to,
+                inviter_name=a.name,
+            )
+            submit_invitation(message)
+        except (MailUnavailable, ValueError, KeyError):
+            # Return normally so the attempt debit commits even when SMTP delivery
+            # is uncertain. Raising here would roll it back and bypass the limit.
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "detail": "Email submission could not be confirmed. The invitation is still "
+                    "available; check before retrying, or copy the instructions instead."
+                },
+            )
+        return {"status": "submitted"}
+
+    @app.get("/v1/projects/{project_id}/invitations")
+    def invitations(
+        project_id: str,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        project_access(db, a, project_id, owner=True)
+        return {
+            "items": [
+                invitation_json(i)
+                for i in db.scalars(
+                    select(Invitation)
+                    .where(Invitation.project_id == project_id)
+                    .order_by(Invitation.created_at.desc())
+                    .limit(100)
+                )
+            ]
+        }
+
+    @app.delete("/v1/projects/{project_id}/invitations/{invitation_id}", status_code=204)
+    def revoke_invitation(
+        project_id: str,
+        invitation_id: str,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        project_access(db, a, project_id, owner=True)
+        invitation = db.get(Invitation, invitation_id)
+        if invitation is None or invitation.project_id != project_id:
+            raise HTTPException(404, "Invitation not found")
+        invitation.revoked = True
+        return Response(status_code=204)
+
+    @app.post("/v1/invitations/preview")
+    def preview_invitation(
+        body: InvitationCode,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        db: Session = Depends(session, scope="function"),
+    ):
+        if authorization:
+            identity = resolve_identity(request, authorization, db)
+            if getattr(identity, "_workspace_connection", None) is not None:
+                raise HTTPException(403, "Connection credentials cannot preview invitations")
+        invitation, project = valid_invitation(db, body.code, claim_secret=body.claim_secret)
+        return {
+            "project": project_json(project),
+            "role": invitation.role,
+            "expires_at": timestamp(invitation.expires_at),
+            "accepted": invitation.used_at is not None,
+        }
+
+    @app.post("/v1/invitations/accept", status_code=201)
+    def accept_invitation(
+        body: InvitationAccept,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        db: Session = Depends(session, scope="function"),
+    ):
+        if authorization:
+            invited_identity = resolve_identity(request, authorization, db)
+            if getattr(invited_identity, "_workspace_connection", None) is not None:
+                raise HTTPException(403, "Connection credentials cannot accept invitations")
+        new_password_hash = None
+        anonymous_password = (
+            body.password is not None
+            and not authorization
+            and not request.cookies.get("workspace_session")
+        )
+        if body.password is not None:
+            same_origin(request)
+            if anonymous_password:
+                consume_auth_rate(db, request, "invite:" + body.code)
+                pending, _ = valid_invitation(db, body.code, claim_secret=body.claim_secret)
+                if pending.used_at is None:
+                    new_password_hash = hash_password(body.password)
+        if not authorization and request.cookies.get("workspace_session"):
+            same_origin(request)
+        if anonymous_password and engine.dialect.name == "sqlite":
+            db.rollback()
+            db.execute(text("BEGIN IMMEDIATE"))
+        invitation, project = valid_invitation(
+            db, body.code, lock=True, claim_secret=body.claim_secret
+        )
+        if invitation.used_at is not None:
+            actor = db.get(Actor, invitation.accepted_actor_id)
+            if invitation.issued_token_digest:
+                token = claim_token(body)
+                if not hmac.compare_digest(digest(token), invitation.issued_token_digest):
+                    raise HTTPException(410, "Invitation credential unavailable")
+            else:
+                authenticated_actor = resolve_identity(request, authorization, db)
+                human(authenticated_actor)
+                if authenticated_actor.id != actor.id:
+                    raise HTTPException(
+                        403, "Sign in with the identity that accepted this invitation"
+                    )
+                token = None
+            member = db.get(Membership, (project.id, actor.id))
+            return {
+                "actor": actor_json(actor),
+                "token": token,
+                "project": project_json(project),
+                "role": member.role,
+            }
+        token = None
+        if authorization or request.cookies.get("workspace_session"):
+            actor = resolve_identity(request, authorization, db)
+            human(actor)
+            if body.name is not None or body.handle is not None or body.password is not None:
+                raise HTTPException(422, "Existing identities keep their profile and password")
+        else:
+            if body.claim_secret is None:
+                raise HTTPException(
+                    422, "A private random claim_secret is required for new identities"
+                )
+            if body.name is None or not body.name.strip():
+                raise HTTPException(422, "Choose a display name")
+            if engine.dialect.name == "postgresql":
+                db.execute(text("SELECT pg_advisory_xact_lock(731958240)"))
+            try:
+                handle = choose_handle(db, body.name, supplied=body.handle)
+            except ValueError as error:
+                raise HTTPException(422, str(error)) from None
+            except FileExistsError:
+                raise HTTPException(409, "Handle already exists; choose another") from None
+            actor = Actor(
+                name=body.name.strip(),
+                handle=handle,
+                kind="human",
+                is_admin=False,
+                password_hash=new_password_hash,
+            )
+            db.add(actor)
+            db.flush()
+            token = issue_token(db, actor, claim_token(body))
+        if db.get(Membership, (project.id, actor.id)):
+            raise HTTPException(
+                409, "You already belong to this project; ask an owner to change your role"
+            )
+        member = Membership(project_id=project.id, actor_id=actor.id, role=invitation.role)
+        db.add(member)
+        invitation.used_at = now()
+        invitation.claim_digest = digest(body.claim_secret) if body.claim_secret else None
+        invitation.accepted_actor_id = actor.id
+        invitation.issued_token_digest = digest(token) if token else None
+        db.flush()
+        emit(db, project, "membership.updated", member_json(db, member))
+        return {
+            "actor": actor_json(actor),
+            "token": token,
+            "project": project_json(project),
+            "role": member.role,
+        }
 
     @app.get("/v1/actors")
     def actors(
@@ -184,8 +949,19 @@ def create_app(database_url: str | None = None):
         human(a)
         if body.kind == "human" and not a.is_admin:
             raise HTTPException(403, "Administrator required")
+        if engine.dialect.name == "postgresql":
+            db.execute(text("SELECT pg_advisory_xact_lock(731958240)"))
+        try:
+            handle = choose_handle(db, body.name, a if body.kind == "agent" else None, body.handle)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from None
+        except FileExistsError:
+            raise HTTPException(409, "Handle already exists") from None
         actor = Actor(
-            name=body.name, kind=body.kind, owner_id=a.id if body.kind == "agent" else None
+            name=body.name,
+            handle=handle,
+            kind=body.kind,
+            owner_id=a.id if body.kind == "agent" else None,
         )
         db.add(actor)
         db.flush()
@@ -201,20 +977,53 @@ def create_app(database_url: str | None = None):
         target = db.get(Actor, actor_id)
         if target is None or not (a.is_admin or target.owner_id == a.id or target.id == a.id):
             raise HTTPException(404, "Actor not found")
+        lock_actor_credentials(db, [actor_id])
+        projects_to_lock = select(AgentConnection.project_id).where(
+            AgentConnection.actor_id == actor_id
+        )
+        list(
+            db.scalars(
+                select(Project)
+                .where(Project.id.in_(projects_to_lock))
+                .order_by(Project.id)
+                .with_for_update()
+            )
+        )
+        target = db.scalar(
+            select(Actor)
+            .where(Actor.id == actor_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         db.execute(update(Token).where(Token.actor_id == actor_id).values(revoked=True))
+        db.execute(
+            update(AgentConnection)
+            .where(AgentConnection.actor_id == actor_id)
+            .values(revoked=True, lease_expires_at=None)
+        )
+        if target.kind == "human":
+            target.password_hash = None
+            db.execute(
+                update(BrowserSession)
+                .where(BrowserSession.actor_id == actor_id)
+                .values(revoked=True)
+            )
         return Response(status_code=204)
 
     @app.get("/v1/projects")
     def projects(
         a=Depends(authenticated, scope="function"), db: Session = Depends(session, scope="function")
     ):
-        items = db.scalars(
+        query = (
             select(Project)
             .join(Membership)
             .where(Membership.actor_id == a.id)
             .order_by(Project.name, Project.id)
         )
-        return {"items": [project_json(p) for p in items]}
+        connection = getattr(a, "_workspace_connection", None)
+        if connection is not None:
+            query = query.where(Project.id == connection.project_id)
+        return {"items": [project_json(p) for p in db.scalars(query)]}
 
     @app.post("/v1/projects", status_code=201)
     def create_project(
@@ -239,6 +1048,19 @@ def create_app(database_url: str | None = None):
         db: Session = Depends(session, scope="function"),
     ):
         return project_json(project_access(db, a, project_id))
+
+    @app.patch("/v1/projects/{project_id}")
+    def rename_project(
+        project_id: str,
+        body: Named,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        p = project_access(db, a, project_id, owner=True)
+        if p.name != body.name:
+            p.name = body.name
+            emit(db, p, "project.updated", project_json(p))
+        return project_json(p)
 
     @app.get("/v1/projects/{project_id}/members")
     def members(
@@ -271,6 +1093,8 @@ def create_app(database_url: str | None = None):
             raise HTTPException(404, "Actor not found")
         if body.role == "owner" and target.kind == "agent":
             raise HTTPException(403, "Agents cannot own projects")
+        if body.role == "guest" and target.kind == "agent":
+            raise HTTPException(403, "Guest roles are for humans; agents use member")
         if db.get(Membership, (project_id, target.id)):
             raise HTTPException(409, "Membership already exists")
         m = Membership(project_id=project_id, actor_id=target.id, role=body.role)
@@ -298,6 +1122,33 @@ def create_app(database_url: str | None = None):
         result = member_json(db, m)
         emit(db, p, "membership.updated", result)
         return result
+
+    @app.put("/v1/projects/{project_id}/members/{actor_id}/role")
+    def change_role(
+        project_id: str,
+        actor_id: str,
+        body: MemberRoleInput,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        p = project_access(db, a, project_id, owner=True)
+        member = db.get(Membership, (project_id, actor_id))
+        if member is None:
+            raise HTTPException(404, "Membership not found")
+        if db.get(Actor, actor_id).kind != "human":
+            raise HTTPException(403, "Only humans may have owner or guest roles")
+        if member.role == "owner" and body.role != "owner":
+            owners = db.scalar(
+                select(func.count())
+                .select_from(Membership)
+                .where(Membership.project_id == project_id, Membership.role == "owner")
+            )
+            if owners <= 1:
+                raise HTTPException(409, "At least one owner must remain")
+        if member.role != body.role:
+            member.role = body.role
+            emit(db, p, "membership.updated", member_json(db, member))
+        return member_json(db, member)
 
     @app.delete("/v1/projects/{project_id}/members/{actor_id}", status_code=204)
     def remove_member(
@@ -377,6 +1228,23 @@ def create_app(database_url: str | None = None):
         emit(db, p, "channel.created", result)
         return result
 
+    @app.patch("/v1/channels/{channel_id}")
+    def rename_channel(
+        channel_id: str,
+        body: Named,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        channel = db.get(Channel, channel_id)
+        if channel is None:
+            raise HTTPException(404, "Channel not found")
+        p = project_access(db, a, channel.project_id, owner=True)
+        db.refresh(channel)
+        if channel.name != body.name:
+            channel.name = body.name
+            emit(db, p, "channel.updated", channel_json(channel))
+        return channel_json(channel)
+
     @app.get("/v1/channels/{channel_id}/threads")
     def threads(
         channel_id: str,
@@ -429,9 +1297,16 @@ def create_app(database_url: str | None = None):
         db: Session = Depends(session, scope="function"),
     ):
         t, p = resource(db, a, Thread, thread_id, write=True)
+        explicit = str(body.reply_to) if body.reply_to else None
+        fingerprint_body = body.model_dump(mode="json")
+        # Keep pre-migration retry keys valid for requests using the legacy shape.
+        if "reply_to" not in body.model_fields_set or explicit is None:
+            fingerprint_body.pop("reply_to")
+        else:
+            fingerprint_body["reply_to"] = explicit
         fingerprint = hashlib.sha256(
             json.dumps(
-                {"thread_id": thread_id, **body.model_dump()},
+                {"thread_id": thread_id, **fingerprint_body},
                 sort_keys=True,
                 separators=(",", ":"),
                 allow_nan=False,
@@ -446,29 +1321,29 @@ def create_app(database_url: str | None = None):
                     raise HTTPException(409, "Idempotency-Key was used for another request")
                 response.status_code = 200
                 return message_json(db, db.get(Message, previous.message_id))
+        legacy = body.metadata.get("reply_to")
+        if legacy is not None:
+            try:
+                legacy = str(UUID(str(legacy)))
+            except ValueError:
+                raise HTTPException(422, "Invalid metadata.reply_to") from None
+        if "reply_to" in body.model_fields_set and legacy and explicit != legacy:
+            raise HTTPException(422, "Conflicting reply_to fields")
+        reply_to = explicit if "reply_to" in body.model_fields_set else legacy
+        if reply_to:
+            parent = db.get(Message, reply_to)
+            if parent is None or parent.thread_id != t.id or parent.reply_to is not None:
+                raise HTTPException(422, "Reply must reference a top-level message in this thread")
         for actor_id in body.mentions:
             if not db.get(Membership, (p.id, actor_id)):
                 raise HTTPException(422, "Mentioned actor is not a project member")
-        current = now()
-        window = db.get(RateWindow, (p.id, a.id))
-        if window is None:
-            window = RateWindow(project_id=p.id, actor_id=a.id, started_at=current, count=0)
-            db.add(window)
-        elapsed = (current - window.started_at.replace(tzinfo=timezone.utc)).total_seconds()
-        if elapsed >= 60:
-            window.started_at, window.count = current, 0
-        elif window.count >= app.state.posting_limit:
-            raise HTTPException(
-                429,
-                "Posting rate limit exceeded",
-                headers={"Retry-After": str(max(1, int(60 - elapsed) + 1))},
-            )
-        window.count += 1
+        enforce_rate(db, p, a)
         m = Message(
             thread_id=t.id,
             project_id=p.id,
             author_id=a.id,
             text=body.text,
+            reply_to=reply_to,
             mentions=body.mentions,
             data=body.metadata,
             sequence=p.cursor + 1,
@@ -488,6 +1363,150 @@ def create_app(database_url: str | None = None):
                 )
             )
         return result
+
+    def change_reaction(message_id, body, a, db, adding):
+        m, p = resource(db, a, Message, message_id, write=True)
+        key = (m.id, a.id, body.emoji)
+        existing = db.get(Reaction, key)
+        if (adding and existing is None) or (not adding and existing is not None):
+            enforce_rate(db, p, a)
+            if adding:
+                db.add(Reaction(message_id=m.id, actor_id=a.id, emoji=body.emoji))
+            else:
+                db.delete(existing)
+            db.flush()
+            emit(
+                db,
+                p,
+                "reaction.added" if adding else "reaction.removed",
+                {
+                    "message_id": m.id,
+                    "emoji": body.emoji,
+                    "actor": reaction_actor(a),
+                    "reactions": reactions_json(db, m.id),
+                },
+                m.thread_id,
+            )
+        return message_json(db, m)
+
+    @app.put("/v1/messages/{message_id}/reactions")
+    def add_reaction(
+        message_id: str,
+        body: ReactionInput,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        return change_reaction(message_id, body, a, db, True)
+
+    @app.delete("/v1/messages/{message_id}/reactions")
+    def remove_reaction(
+        message_id: str,
+        body: ReactionInput,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        return change_reaction(message_id, body, a, db, False)
+
+    @app.get("/v1/threads/{thread_id}/context")
+    def context(
+        thread_id: str,
+        limit: int = Query(20, ge=1, le=100),
+        trigger_message_id: UUID | None = None,
+        max_chars: int = Query(12000, ge=1000, le=50000),
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        t, p = resource(db, a, Thread, thread_id)
+        snapshot = p.cursor
+        rows = list(
+            db.scalars(
+                select(Message)
+                .where(Message.thread_id == t.id, Message.sequence <= snapshot)
+                .order_by(Message.sequence.desc())
+                .limit(limit + 1)
+            )
+        )
+        trigger = db.get(Message, str(trigger_message_id)) if trigger_message_id else None
+        if trigger_message_id and (
+            trigger is None or trigger.thread_id != t.id or trigger.sequence > snapshot
+        ):
+            raise HTTPException(404, "Trigger message not found")
+        parent = db.get(Message, trigger.reply_to) if trigger and trigger.reply_to else None
+        remaining = max_chars
+
+        def clipped(value, allowance):
+            nonlocal remaining
+            original = value["text"]
+            take = min(remaining, allowance, len(original))
+            value["text"] = original[:take]
+            remaining -= take
+            if take < len(original):
+                value["truncated"] = True
+            return value
+
+        rules = clipped({"text": p.rules, "version": p.rules_version}, max_chars // 4)
+        trigger_data = clipped(message_json(db, trigger), max_chars // 4) if trigger else None
+        parent_data = clipped(message_json(db, parent), max_chars // 4) if parent else None
+        # Distribute remaining text over recent messages, giving newer messages first claim.
+        recent = []
+        selected = rows[:limit]
+        for index, message in enumerate(selected):
+            allowance = remaining // (len(selected) - index)
+            recent.append(clipped(message_json(db, message), allowance))
+        recent.reverse()
+        return {
+            "thread": thread_json(t),
+            "rules": rules,
+            "messages": recent,
+            "cursor": snapshot,
+            "has_older": len(rows) > limit,
+            "trigger_message": trigger_data,
+            "parent_message": parent_data,
+        }
+
+    @app.get("/v1/projects/{project_id}/inbox")
+    def inbox(
+        project_id: str,
+        after: int = Query(0, ge=0),
+        limit: int = Query(50, ge=1, le=500),
+        followed_thread_ids: list[UUID] = Query(default=[]),
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        p = project_access(db, a, project_id)
+        if len(followed_thread_ids) > 100:
+            raise HTTPException(422, "At most 100 followed threads are allowed")
+        followed = {str(value) for value in followed_thread_ids}
+        for thread_id in followed:
+            thread = db.get(Thread, thread_id)
+            if thread is None or thread.project_id != p.id:
+                raise HTTPException(404, "Followed thread not found")
+        snapshot = p.cursor
+        rows = list(
+            db.scalars(
+                select(Event)
+                .where(Event.project_id == p.id, Event.id > after, Event.id <= snapshot)
+                .order_by(Event.id)
+                .limit(1000)
+            )
+        )
+        items, scanned = [], after
+        for event in rows:
+            scanned = event.id
+            payload = event.payload
+            if (
+                event.type == "message.created"
+                and payload.get("author", {}).get("id") != a.id
+                and (a.id in payload.get("mentions", []) or event.thread_id in followed)
+            ):
+                items.append(event_json(event))
+                if len(items) == limit:
+                    break
+        return {
+            "items": items,
+            "next_cursor": scanned if scanned < snapshot else None,
+            "cursor": snapshot,
+        }
 
     @app.get("/v1/threads/{thread_id}/messages")
     def messages(
@@ -543,11 +1562,17 @@ def create_app(database_url: str | None = None):
 
     static = Path(__file__).parent / "static"
     if static.exists():
+        script_version = hashlib.sha256((static / "app.js").read_bytes()).hexdigest()[:12]
         app.mount("/static", StaticFiles(directory=static), name="static")
 
         @app.get("/", include_in_schema=False)
         def index():
-            return FileResponse(static / "index.html")
+            html = (
+                (static / "index.html")
+                .read_text()
+                .replace('src="/static/app.js"', f'src="/static/app.js?v={script_version}"')
+            )
+            return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
     return app
 

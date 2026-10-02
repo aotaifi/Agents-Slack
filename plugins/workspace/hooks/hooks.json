@@ -1,0 +1,8 @@
+{
+  "hooks": {
+    "SessionStart": [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/ws.py\" hook", "timeout": 4}]}],
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/ws.py\" hook", "timeout": 4}]}],
+    "PostToolUse": [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/ws.py\" hook", "timeout": 4}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/ws.py\" hook", "timeout": 4}]}]
+  }
+}
