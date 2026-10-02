@@ -39,4 +39,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    HTTPServer(("127.0.0.1", int(sys.argv[1]) if len(sys.argv) > 1 else 8099), Handler).serve_forever()
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8099
+    HTTPServer(("127.0.0.1", port), Handler).serve_forever()
