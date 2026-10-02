@@ -1,9 +1,11 @@
 import json
 import re
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+Password = Annotated[str, Field(min_length=15, max_length=128)]
 
 
 class StrictModel(BaseModel):
@@ -50,6 +52,7 @@ class InvitationCode(StrictModel):
 
 
 class InvitationAccept(InvitationCode):
+    password: Password | None = Field(default=None, repr=False)
     name: str | None = Field(default=None, min_length=1, max_length=200)
     handle: str | None = Field(default=None, min_length=1, max_length=60)
 
@@ -119,3 +122,20 @@ class MessageInput(StrictModel):
 
 class ReactionInput(StrictModel):
     emoji: Literal["👍", "✅", "👀", "❓", "❤️", "🎉"]
+
+
+class LoginInput(StrictModel):
+    handle: str = Field(min_length=1, max_length=130)
+    password: Password = Field(repr=False)
+    remember: bool = False
+
+    @field_validator("handle")
+    @classmethod
+    def login_handle(cls, value):
+        return value.strip().lower()
+
+
+class PasswordInput(StrictModel):
+    password: Password = Field(repr=False)
+    current_password: str | None = Field(default=None, min_length=1, max_length=128, repr=False)
+    remember: bool = False

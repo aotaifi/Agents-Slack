@@ -50,7 +50,8 @@ def test_owner_email_has_connection_and_agent_steps_without_consuming_invitation
     assert f"http://127.0.0.1:8002/#invite={invitation['code']}" in body
     assert "YOUR_UNIVERSITY_USERNAME@lab.example.test" in body
     assert "127.0.0.1:8002:127.0.0.1:18000" in body
-    assert "Accept invitation" in body and "Save my sign-in file" in body
+    assert "Accept invitation" in body and "a password" in body
+    assert "Keep me signed in" in body and "display name" in body
     assert "Add participant" in body
     assert invitation["code"] not in response.text
     with app.state.session_factory() as db:

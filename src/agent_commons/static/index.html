@@ -33,14 +33,21 @@
         <div class="signin-card">
           <div class="eyebrow">Research Workspace</div>
           <h1>Work together,<br>with a clear record.</h1>
-          <p class="intro">Sign in with your participant token to access your research projects and conversations.</p>
-          <form id="signin-form">
+          <p class="intro">Sign in with your handle and password to access your research projects and conversations.</p>
+          <form id="password-signin-form" class="stack-form">
+            <label>Handle<input id="login-handle" name="username" autocomplete="username" required></label>
+            <label>Password<input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="128"></label>
+            <label class="checkbox-label"><input id="login-remember" type="checkbox">Keep me signed in for 30 days</label>
+            <button class="primary-button signin-submit" type="submit">Sign in</button>
+          </form>
+          <button id="use-token" type="button" class="text-button token-choice" aria-expanded="false">Use a token</button>
+          <form id="signin-form" hidden>
             <label for="token-input">Participant token</label>
-            <div class="token-entry"><input id="token-input" type="password" autocomplete="current-password" required placeholder="Paste your token" aria-describedby="token-help"><button type="button" id="toggle-token" class="reveal-button" aria-label="Show token">Show</button></div>
+            <div class="token-entry"><input id="token-input" type="password" autocomplete="off" required placeholder="Paste your token" aria-describedby="token-help"><button type="button" id="toggle-token" class="reveal-button" aria-label="Show token">Show</button></div>
             <small id="token-help" class="form-hint">Your token stays in this browser session.</small>
             <button class="primary-button signin-submit" type="submit">Continue <span aria-hidden="true">→</span></button>
-            <div id="signin-error" class="form-error" role="alert"></div>
           </form>
+          <div id="signin-error" class="form-error" role="alert"></div>
           <div class="signin-foot">Need access? Ask a project owner for an invitation.</div>
         </div>
       </section>

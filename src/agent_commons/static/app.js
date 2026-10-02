@@ -22,16 +22,26 @@
   function actorDetail(actor) { return `${actor?.kind === 'agent' ? 'Agent' : 'Human'}${actor?.owner ? ` · owned by ${actorLabel(actor.owner)}` : ''}`; }
   function replyRootId(message) { return Object.hasOwn(message, 'reply_to') ? message.reply_to : message.metadata?.reply_to || null; }
   let recoveryGeneration = 0;
+  let authMutationTail = Promise.resolve();
+  let sessionRequestEpoch = 0;
+  let sessionRotations = 0;
+  function mutateAuth(operation) { const result = authMutationTail.then(operation); authMutationTail = result.catch(() => {}); return result; }
+  async function rotateSession(operation) {
+    // Requests issued before or during cookie rotation cannot expire the new session.
+    sessionRequestEpoch++; sessionRotations++;
+    try { return await mutateAuth(operation); }
+    finally { sessionRequestEpoch++; sessionRotations--; }
+  }
   async function api(path, options = {}) {
-    const { anonymous = false, ...requestOptions } = options;
-    const requestGeneration = state.authGeneration; const requestToken = state.token;
+    const { anonymous = false, silent401 = false, ...requestOptions } = options;
+    const requestGeneration = state.authGeneration; const requestToken = state.token; const requestEpoch = sessionRequestEpoch;
     const headers = new Headers(options.headers || {});
     if (state.token && !anonymous) headers.set('Authorization', `Bearer ${state.token}`);
     if (options.body !== undefined) headers.set('Content-Type', 'application/json');
     let response;
-    try { response = await fetch(`${API}${path}`, { ...requestOptions, headers, body: options.body === undefined ? undefined : JSON.stringify(options.body) }); }
+    try { response = await fetch(`${API}${path}`, { ...requestOptions, credentials: requestOptions.credentials ?? 'same-origin', headers, body: options.body === undefined ? undefined : JSON.stringify(options.body) }); }
     catch { throw new Error('Could not reach the workspace. Check your connection and try again.'); }
-    if (response.status === 401) { if (!anonymous && requestGeneration === state.authGeneration && requestToken === state.token) signOut('Your access token is no longer valid. Sign in again with an active token.'); throw new Error('Authentication required'); }
+    if (response.status === 401) { if (!anonymous && !silent401 && !sessionRotations && requestEpoch === sessionRequestEpoch && requestGeneration === state.authGeneration && requestToken === state.token) clearAuth('Your sign-in has expired. Sign in again.'); throw new Error('Authentication required'); }
     if (response.status === 204) return null;
     let data = null;
     try { data = await response.json(); } catch { /* API may return an empty response */ }
@@ -42,28 +52,78 @@
     }
     return data;
   }
-  function signOut(message = '', discardRecovery = true) {
+  function clearAuth(message = '', discardRecovery = true) {
     $('#edit-project').hidden = true; $('#edit-channel').hidden = true;
     if (discardRecovery) { recoveryGeneration++; sessionStorage.removeItem('workspace_invitation'); sessionStorage.removeItem('workspace_invitation_claims'); renderCredentialRecovery(); }
     $('#invitation-view').hidden = true;
-    $('#new-project').disabled = true; state.authGeneration++; state.projectGeneration++; state.navigationGeneration++; stopPolling(); if (ui.modal.open) ui.modal.close(); $('#token-input').value = ''; ui.input.value = ''; state.pendingPost = null; state.pendingMentions.clear(); state.replyTo = null; state.projects = []; state.channels = []; state.threads = []; state.members = []; state.actors = []; state.messages = []; state.messageCursor = 0; state.eventCursor = 0; state.token = ''; state.me = null; sessionStorage.removeItem('commons_token'); state.project = null; state.channel = null; state.thread = null;
+    $('#new-project').disabled = true; state.authGeneration++; state.projectGeneration++; state.navigationGeneration++; stopPolling(); if (ui.modal.open) ui.modal.close(); $('#token-input').value = ''; $('#login-password').value = ''; ui.input.value = ''; state.pendingPost = null; state.pendingMentions.clear(); state.replyTo = null; state.projects = []; state.channels = []; state.threads = []; state.members = []; state.actors = []; state.messages = []; state.messageCursor = 0; state.eventCursor = 0; state.token = ''; state.me = null; sessionStorage.removeItem('commons_token'); state.project = null; state.channel = null; state.thread = null;
     ui.signin.hidden = false; ui.workspace.hidden = true; ui.identity.hidden = true; ui.signout.hidden = true; ui.projects.replaceChildren(); ui.channels.textContent = 'Sign in to view projects';
     if (message) $('#signin-error').textContent = message;
   }
+  function renderIdentity() {
+    const me = state.me; if (!me) return;
+    $('#new-project').disabled = me.kind !== 'human';
+    ui.identity.replaceChildren(); const avatar = document.createElement('span'); avatar.className = 'avatar'; avatar.textContent = initials(me.name); const label = document.createElement('span'); label.textContent = `${actorLabel(me)} · ${actorDetail(me)}`; ui.identity.append(avatar, label);
+  }
+  async function enterWorkspace(me, generation, suggestPassword = false) {
+    if (generation !== state.authGeneration) return;
+    state.me = me; $('#invitation-view').hidden = true; $('#token-input').value = ''; $('#login-password').value = '';
+    ui.signin.hidden = true; ui.workspace.hidden = false; ui.identity.hidden = false; ui.signout.hidden = false; renderIdentity();
+    await loadProjects(); if (generation !== state.authGeneration) return; setStatus('Connected');
+    if (suggestPassword && me.kind === 'human' && !me.has_password) showAccount();
+  }
   async function signIn(token) {
-    $('#invitation-view').hidden = true;
-    state.authGeneration++; const authGeneration = state.authGeneration; state.token = token.trim(); if (!state.token) return;
+    state.authGeneration++; const generation = state.authGeneration; state.token = token.trim(); if (!state.token) return;
     setStatus('Connecting', 'busy'); $('#signin-error').textContent = '';
-    try {
-      const me = await api('/me'); if (authGeneration !== state.authGeneration) return;
-      state.me = me; $('#new-project').disabled = me.kind !== 'human'; sessionStorage.setItem('commons_token', state.token); $('#token-input').value = '';
-      ui.signin.hidden = true; ui.workspace.hidden = false; ui.identity.hidden = false; ui.signout.hidden = false;
-      ui.identity.replaceChildren(); const avatar = document.createElement('span'); avatar.className = 'avatar'; avatar.textContent = initials(me.name); const identityText = document.createElement('span'); identityText.textContent = `${actorLabel(me)} · ${actorDetail(me)}`; ui.identity.append(avatar, identityText);
-      await loadProjects(); setStatus('Connected');
-    } catch (error) {
-      if (error.message !== 'Authentication required') { $('#signin-error').textContent = error.message; setStatus('Unable to connect', 'offline'); }
-      else setStatus('Sign in required', 'offline');
-    }
+    try { const me = await api('/me', { silent401: true }); if (generation !== state.authGeneration) return; sessionStorage.setItem('commons_token', state.token); await enterWorkspace(me, generation, true); }
+    catch (error) { if (generation !== state.authGeneration) return; clearAuth('', false); $('#signin-error').textContent = error.message === 'Authentication required' ? 'This token is not valid.' : error.message; setStatus('Sign in required', 'offline'); }
+  }
+  async function passwordSignIn(handle, password, remember = false) {
+    const generation = ++state.authGeneration; state.token = ''; sessionStorage.removeItem('commons_token'); $('#signin-error').textContent = ''; setStatus('Connecting', 'busy');
+    try { const result = await mutateAuth(() => api('/auth/login', { method: 'POST', anonymous: true, silent401: true, body: { handle: handle.trim(), password, remember } })); if (generation !== state.authGeneration) return; await enterWorkspace(result.actor, generation); return generation === state.authGeneration; }
+    catch (error) { if (generation !== state.authGeneration) return false; ui.signin.hidden = false; $('#invitation-view').hidden = true; $('#login-password').value = ''; $('#signin-error').textContent = error.message === 'Authentication required' ? 'Handle or password is incorrect.' : error.message; setStatus('Sign in required', 'offline'); return false; }
+  }
+  async function restoreSession() {
+    const generation = ++state.authGeneration;
+    try { const me = await api('/me', { silent401: true }); if (generation !== state.authGeneration) return; await enterWorkspace(me, generation, !!state.token); }
+    catch (error) { if (generation !== state.authGeneration) return; if (error.message === 'Authentication required') { clearAuth('', false); $('#signin-error').textContent = ''; setStatus('Ready'); } else { $('#signin-error').textContent = error.message; setStatus('Unable to connect', 'offline'); } }
+  }
+  async function signOut() {
+    const generation = ++state.authGeneration; ui.signout.disabled = true; if (ui.modal.open) ui.modal.close(); stopPolling();
+    try { await mutateAuth(() => api('/auth/logout', { method: 'POST', anonymous: true, silent401: true })); if (generation !== state.authGeneration) return; clearAuth(); $('#signin-error').textContent = ''; setStatus('Ready'); return true; }
+    catch (error) { if (generation !== state.authGeneration) return false; showError(`Could not sign out of the server: ${error.message} Your session may still be active. Please retry.`); startPolling(); return false; }
+    finally { ui.signout.disabled = false; }
+  }
+  function passwordFields(current = false) {
+    const fields = [];
+    if (current) { const field = formField('Current password', 'current_password', 'password'); field.input.autocomplete = 'current-password'; fields.push(field); }
+    const password = formField('New password', 'password', 'password'); password.input.autocomplete = 'new-password'; password.input.minLength = 15; password.input.maxLength = 128;
+    const confirm = formField('Confirm password', 'confirm_password', 'password'); confirm.input.autocomplete = 'new-password'; confirm.input.minLength = 15; confirm.input.maxLength = 128;
+    fields.push(password, confirm); return fields;
+  }
+  function checkPassword(password, confirmation) {
+    if (password.length < 15 || password.length > 128) throw new Error('Use a password with 15 to 128 characters.');
+    if (password !== confirmation) throw new Error('The passwords do not match.');
+  }
+  function refreshOwnIdentity(me) {
+    const actor = value => !value ? value : { ...value, ...(value.id === me.id ? { name: me.name } : {}), ...(value.owner?.id === me.id ? { owner: { ...value.owner, name: me.name } } : {}) };
+    const message = value => ({ ...value, author: actor(value.author), reactions: (value.reactions || []).map(r => ({ ...r, actors: (r.actors || []).map(actor) })) });
+    state.members = state.members.map(m => ({ ...m, actor: actor(m.actor) })); state.actors = state.actors.map(actor); state.messages = state.messages.map(message);
+    if (state.replyTo) state.replyTo = message(state.replyTo);
+    renderMessages(); updateComposer();
+  }
+  function showAccount() {
+    if (!state.me) return;
+    if (state.me.kind !== 'human') { showMembers(); return; }
+    const generation = state.authGeneration; const wrap = document.createElement('div');
+    const handle = formField('Handle', 'username'); handle.input.value = state.me.handle; handle.input.readOnly = true; handle.input.autocomplete = 'username'; wrap.append(handle.label);
+    const profile = document.createElement('form'); profile.className = 'stack-form'; const name = formField('Display name', 'name'); name.input.value = state.me.name; name.input.maxLength = 200; const profileStatus = document.createElement('div'); profileStatus.className = 'modal-alert'; profile.append(name.label, profileStatus, actionRow('Save display name'));
+    profile.addEventListener('submit', async event => { event.preventDefault(); const button = profile.querySelector('[type=submit]'); button.disabled = true; try { const me = await api('/me', { method: 'PATCH', body: { name: name.input.value.trim() } }); if (generation !== state.authGeneration) return; state.me = me; refreshOwnIdentity(me); renderIdentity(); profileStatus.textContent = 'Display name saved.'; } catch (error) { if (generation === state.authGeneration) profileStatus.textContent = error.message; } finally { button.disabled = false; } }); wrap.append(profile);
+    const form = document.createElement('form'); form.className = 'stack-form account-password'; const heading = document.createElement('h3'); heading.textContent = state.me.has_password ? 'Change my password' : 'Set my password';
+    const username = document.createElement('input'); username.type = 'text'; username.name = 'username'; username.autocomplete = 'username'; username.value = state.me.handle; username.readOnly = true; username.hidden = true;
+    const fields = passwordFields(!!state.me.has_password); const rememberLabel = document.createElement('label'); rememberLabel.className = 'checkbox-label'; const remember = document.createElement('input'); remember.type = 'checkbox'; remember.name = 'remember'; rememberLabel.append(remember, document.createTextNode('Keep me signed in for 30 days'));
+    const status = document.createElement('div'); status.className = 'modal-alert'; form.append(heading, username, ...fields.map(f => f.label), rememberLabel, status, actionRow(state.me.has_password ? 'Change password' : 'Set password'));
+    form.addEventListener('submit', async event => { event.preventDefault(); const button = form.querySelector('[type=submit]'); button.disabled = true; status.textContent = ''; try { const values = fields.map(f => f.input.value); const password = values.at(-2); checkPassword(password, values.at(-1)); const result = await rotateSession(() => api('/auth/password', { method: 'POST', silent401: true, body: { password, ...(fields.length === 3 ? { current_password: values[0] } : {}), remember: remember.checked } })); if (generation !== state.authGeneration) return; state.token = ''; sessionStorage.removeItem('commons_token'); state.me = result.actor; renderIdentity(); fields.forEach(f => { f.input.value = ''; }); showAccount(); $('.account-password .modal-alert').textContent = 'Password saved. You can now sign in with your handle and password.'; } catch (error) { if (generation === state.authGeneration) status.textContent = error.message === 'Authentication required' ? 'Current password is incorrect.' : error.message; } finally { button.disabled = false; } }); wrap.append(form); openModal('My account', 'YOUR HUMAN IDENTITY', wrap);
   }
   function stopPolling() { if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer = null; }
   function startPolling() {
@@ -73,7 +133,7 @@
     pollEvents(projectId, projectGeneration);
   }
   async function pollEvents(projectId, projectGeneration) {
-    if (state.pollBusy || !state.token || !state.project || state.project.id !== projectId || state.projectGeneration !== projectGeneration) return;
+    if (state.pollBusy || !state.me || !state.project || state.project.id !== projectId || state.projectGeneration !== projectGeneration) return;
     state.pollBusy = true;
     try {
       let after = state.eventCursor; let snapshot = state.eventCursor; let page; const changedThreads = new Set();
@@ -399,7 +459,7 @@
       const link = new URL('/', location.origin); const local = ['127.0.0.1', 'localhost', '[::1]'].includes(link.hostname); if (local) link.port = String(connection.local_port); link.hash = new URLSearchParams({ invite: result.code }).toString();
       const host = /^[a-zA-Z0-9][a-zA-Z0-9.-]*$/.test(connection.ssh_host) ? connection.ssh_host : 'LAB_HOST';
       const nextStep = local ? 3 : 2;
-      const instructions = `Hi,\n\nCome join us in the research workspace for ${projectName}, together with your research agents.\n\nIt's a place to share findings, ask questions, compare approaches, and help each other get unstuck. Think of it as a research coffee room. Your agents are welcome, although their contribution to making coffee remains disappointing.\n\nPost when you have something useful to share or a question worth discussing. Short messages are welcome. Nobody needs a 40-page report to say "that didn't converge."\n\nHere's how to join:\n\n${local ? `1. Open Terminal on your Mac or computer. Replace YOUR_UNIVERSITY_USERNAME with your university username and run:\n\nssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:${connection.local_port}:127.0.0.1:${connection.ssh_app_port} YOUR_UNIVERSITY_USERNAME@${host}\n\nLeave Terminal open. If it stays quiet, that's normal. You need existing SSH access to this workstation; the invitation does not provide a university account.\n\n2. Open this invitation in your browser (Safari, Chrome, or another browser):\n` : '1. Open this invitation in your browser:\n'}${link.href}\n\n${nextStep}. Choose your name and optional handle, click Accept invitation, then Save my sign-in file. If already signed in, accept using your existing human identity.\n\nTo connect your agent, open People → Create an agent and save its separate one-time token. ${result.role === 'owner' ? 'Then use People → Add participant to add it to the project.' : 'Ask a project owner to add your agent to this project.'} Give your agent its own token, the project ID, and the workspace connection instructions.\n\nOnce you're in, introduce yourself and your agent. Tell us what you're working on and what you'd like to explore together.\n\nLooking forward to exchanging ideas. Disagreements welcome; evidence appreciated.\n\n${inviterName}\n\nProject role: ${result.role === 'owner' ? 'Owner (invite and manage)' : 'Guest (read and post)'}. Expires: ${new Date(result.expires_at).toLocaleString()}. This invitation can be used once. Keep it private.`;
+      const instructions = `Hi,\n\nCome join us in the research workspace for ${projectName}, together with your research agents.\n\nIt's a place to share findings, ask questions, compare approaches, and help each other get unstuck. Think of it as a research coffee room. Your agents are welcome, although their contribution to making coffee remains disappointing.\n\nPost when you have something useful to share or a question worth discussing. Short messages are welcome. Nobody needs a 40-page report to say "that didn't converge."\n\nHere's how to join:\n\n${local ? `1. Open Terminal on your Mac or computer. Replace YOUR_UNIVERSITY_USERNAME with your university username and run:\n\nssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:${connection.local_port}:127.0.0.1:${connection.ssh_app_port} YOUR_UNIVERSITY_USERNAME@${host}\n\nLeave Terminal open. If it stays quiet, that's normal. You need existing SSH access to this workstation; the invitation does not provide a university account.\n\n2. Open this invitation in your browser (Safari, Chrome, or another browser):\n` : '1. Open this invitation in your browser:\n'}${link.href}\n\n${nextStep}. Choose your display name, optional handle, and password, then click Accept invitation. Sign in later with your handle and password; use My account to update your display name or password. If already signed in, accept using your existing human identity.\n\nTo connect your agent, open People → Create an agent and save its separate one-time token. ${result.role === 'owner' ? 'Then use People → Add participant to add it to the project.' : 'Ask a project owner to add your agent to this project.'} Give your agent its own token, the project ID, and the workspace connection instructions.\n\nOnce you're in, introduce yourself and your agent. Tell us what you're working on and what you'd like to explore together.\n\nLooking forward to exchanging ideas. Disagreements welcome; evidence appreciated.\n\n${inviterName}\n\nProject role: ${result.role === 'owner' ? 'Owner (invite and manage)' : 'Guest (read and post)'}. Expires: ${new Date(result.expires_at).toLocaleString()}. This invitation can be used once. Keep it private.`;
       const wrap = document.createElement('div'); const note = document.createElement('p'); note.className = 'modal-copy'; note.textContent = 'Share these instructions privately. The researcher chooses their own name and handle. Save the link now; it is shown only once.';
       const text = document.createElement('textarea'); text.readOnly = true; text.rows = 10; text.value = instructions; text.setAttribute('aria-label', 'Invitation and connection instructions');
       const copy = document.createElement('button'); copy.type = 'button'; copy.className = 'primary-button'; copy.textContent = 'Copy invitation and SSH steps'; copy.addEventListener('click', async () => { try { await navigator.clipboard.writeText(instructions); copy.textContent = 'Copied'; } catch { text.focus(); text.select(); copy.textContent = 'Select and copy instructions'; } });
@@ -435,7 +495,7 @@
     });
   }
   function savedClaims() { try { return JSON.parse(sessionStorage.getItem('workspace_invitation_claims') || '{}'); } catch { return {}; } }
-  function writeClaims(claims) { sessionStorage.setItem('workspace_invitation_claims', JSON.stringify(claims)); }
+  function writeClaims(claims) { for (const claim of Object.values(claims)) { if (claim.body) { delete claim.body.password; delete claim.body.confirm_password; delete claim.body.current_password; } } sessionStorage.setItem('workspace_invitation_claims', JSON.stringify(claims)); }
   function forgetClaim(code) { const claims = savedClaims(); delete claims[code]; writeClaims(claims); renderCredentialRecovery(); }
   function renderCredentialRecovery() {
     const banner = $('#credential-recovery'); banner.replaceChildren(); const entries = Object.entries(savedClaims()); banner.hidden = !entries.length;
@@ -456,14 +516,14 @@
     const logoutGeneration = recoveryGeneration;
     stopPolling(); ui.signin.hidden = true; ui.workspace.hidden = true; $('#invitation-view').hidden = false;
     const content = $('#invitation-content'); content.replaceChildren(); const title = document.createElement('h1'); title.textContent = 'Join a research project'; content.append(title);
-    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'secondary-button'; cancel.textContent = 'Back to sign-in'; cancel.addEventListener('click', () => { sessionStorage.removeItem('workspace_invitation'); $('#invitation-view').hidden = true; const token = state.token; if (token) signIn(token); else signOut('', false); });
+    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'secondary-button'; cancel.textContent = 'Back to sign-in'; cancel.addEventListener('click', () => { sessionStorage.removeItem('workspace_invitation'); $('#invitation-view').hidden = true; const token = state.token; if (token) signIn(token); else restoreSession(); });
     try {
       const priorClaim = savedClaims()[code];
       const invitation = await api('/invitations/preview', { method: 'POST', anonymous: true, body: { code, ...(priorClaim ? { claim_secret: priorClaim.body.claim_secret } : {}) } });
       if (generation !== state.authGeneration) return;
-      if (state.token) {
+      {
         // Check cached identity without replacing an invitation screen on a 401.
-        const response = await fetch(`${API}/me`, { headers: { Authorization: `Bearer ${state.token}` } });
+        const response = await fetch(`${API}/me`, { credentials: 'same-origin', headers: state.token ? { Authorization: `Bearer ${state.token}` } : {} });
         if (generation !== state.authGeneration) return;
         if (response.ok) { const identity = await response.json(); if (generation !== state.authGeneration) return; state.me = identity; }
         else if (response.status === 401) { state.token = ''; state.me = null; sessionStorage.removeItem('commons_token'); }
@@ -472,12 +532,13 @@
       ui.signin.hidden = true; $('#invitation-view').hidden = false;
       const intro = document.createElement('p'); intro.className = 'intro'; intro.textContent = `Join ${invitation.project.name} as ${invitation.role === 'owner' ? 'an owner' : 'a guest'}. ${invitation.role === 'owner' ? 'You can invite researchers and manage this project.' : 'You can read and post messages.'}`; content.append(intro);
       if (generation !== state.authGeneration) return;
-      const existing = priorClaim ? !!priorClaim.existingActorId : state.me?.kind === 'human' && state.token; const fields = [];
+      const existing = priorClaim ? !!priorClaim.existingActorId : state.me?.kind === 'human'; const fields = [];
       if (priorClaim?.existingActorId && priorClaim.existingActorId !== state.me?.id) throw new Error('Sign in as the human who started this invitation, then resume it.');
       const form = document.createElement('form'); form.className = 'stack-form';
       if (existing) { const identity = document.createElement('p'); identity.textContent = `Join using ${actorLabel(state.me)}.`; form.append(identity); }
-      else { const name = formField('Your display name', 'name', 'text', 'e.g. Alex Kim'); name.input.maxLength = 200; const handle = formField('Your handle (optional)', 'handle', 'text', 'e.g. alex-kim'); handle.input.required = false; handle.input.maxLength = 60; if (priorClaim) { name.input.value = priorClaim.body.name; handle.input.value = priorClaim.body.handle || ''; } fields.push(name, handle); form.append(name.label, handle.label); }
-      const hint = document.createElement('small'); hint.className = 'form-hint'; hint.textContent = existing ? 'This invitation adds project membership to your existing human identity.' : 'Your handle is generated if omitted. Names and handles cannot currently be edited. Save your personal sign-in file after joining.';
+      else { const name = formField('Your display name', 'name', 'text', 'e.g. Alex Kim'); name.input.maxLength = 200; const handle = formField('Your handle (optional)', 'handle', 'text', 'e.g. alex-kim'); handle.input.required = false; handle.input.maxLength = 60; if (priorClaim) { name.input.value = priorClaim.body.name; handle.input.value = priorClaim.body.handle || ''; } handle.input.autocomplete = 'username'; const passwords = invitation.accepted ? [formField('Password you chose when joining', 'password', 'password')] : passwordFields(); if (invitation.accepted) passwords[0].input.autocomplete = 'current-password'; fields.push(name, handle, ...passwords); form.append(name.label, handle.label, ...passwords.map(f => f.label)); }
+      const hint = document.createElement('small'); hint.className = 'form-hint'; hint.textContent = existing ? 'This invitation adds project membership to your existing human identity.' : invitation.accepted ? 'Your signup already completed. Enter the password you chose to resume your sign-in. This does not change your password.' : 'Your handle is generated if omitted and stays fixed. Choose a password with 15 to 128 characters. You can change your display name in My account.';
+      const rememberLabel = document.createElement('label'); rememberLabel.className = 'checkbox-label'; const remember = document.createElement('input'); remember.type = 'checkbox'; remember.name = 'remember'; rememberLabel.append(remember, document.createTextNode('Keep me signed in for 30 days')); if (!existing) form.append(rememberLabel);
       const error = document.createElement('div'); error.className = 'form-error'; error.setAttribute('role', 'alert'); const submit = document.createElement('button'); submit.type = 'submit'; submit.className = 'primary-button'; submit.textContent = invitation.accepted ? 'Resume invitation' : 'Accept invitation'; form.append(hint, error, submit);
       form.addEventListener('submit', async e => {
         e.preventDefault(); for (const button of content.querySelectorAll('button')) button.disabled = true; error.textContent = '';
@@ -486,24 +547,30 @@
           if (!claim) { const bytes = crypto.getRandomValues(new Uint8Array(32)); const secret = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join(''); claim = { existingActorId: existing ? state.me.id : null, body: { code, claim_secret: secret } }; }
           if (!existing && !invitation.accepted) claim.body = { code, claim_secret: claim.body.claim_secret, name: fields[0].input.value.trim(), ...(fields[1].input.value.trim() ? { handle: fields[1].input.value.trim() } : {}) };
           claims[code] = claim; writeClaims(claims);
-          const result = await api('/invitations/accept', { method: 'POST', anonymous: !existing, body: claim.body });
+          const password = !existing ? fields[2].input.value : '';
+          if (!existing) checkPassword(password, invitation.accepted ? password : fields[3].input.value);
+          const result = await api('/invitations/accept', { method: 'POST', anonymous: !existing, credentials: existing ? 'same-origin' : 'omit', body: { ...claim.body, ...(!existing && !invitation.accepted ? { password } : {}) } });
+          fields.slice(2).forEach(field => { field.input.value = ''; });
           if (logoutGeneration !== recoveryGeneration) return;
           const latestClaims = savedClaims();
           if (result.token) { latestClaims[code] = { ...claim, credentials: { actor: result.actor, token: result.token } }; writeClaims(latestClaims); } else { delete latestClaims[code]; writeClaims(latestClaims); }
           renderCredentialRecovery();
           if (generation !== state.authGeneration) return;
-          const token = result.token || state.token; sessionStorage.setItem('commons_token', token); sessionStorage.removeItem('workspace_invitation');
-          const loginGeneration = state.authGeneration + 1; await signIn(token);
+          sessionStorage.removeItem('workspace_invitation');
+          const loginGeneration = state.authGeneration + 1;
+          if (!existing && password) { const loggedIn = await passwordSignIn(result.actor.handle, password, remember.checked); if (!loggedIn) return; if (state.me?.id === result.actor.id) forgetClaim(code); }
+          else if (result.token || state.token) await signIn(result.token || state.token);
+          else await restoreSession();
           if (loginGeneration !== state.authGeneration) return;
           if (state.me?.id === result.actor.id) { const project = state.projects.find(p => p.id === result.project.id); if (project) await selectProject(project); }
           if (loginGeneration !== state.authGeneration) return;
-          if (result.token) {
+          if (result.token && !password) {
             const saved = document.createElement('div'); const note = document.createElement('p'); note.className = 'modal-copy'; note.textContent = 'You have joined the project. Save your personal sign-in file privately; you will need its token to sign in on another browser or after signing out.'; saved.append(note, saveCredentialsButton({ actor: result.actor, token: result.token }, () => forgetClaim(code))); openModal('Save your sign-in', 'YOUR HUMAN IDENTITY', saved);
           }
         } catch (e) { if (logoutGeneration !== recoveryGeneration) return; if (generation !== state.authGeneration) { renderCredentialRecovery(); return; } error.textContent = `${e.message} If the connection was interrupted, retry here to recover the same sign-in.`; for (const button of content.querySelectorAll('button')) button.disabled = false; renderCredentialRecovery(); }
       });
       content.append(form);
-      if (existing && !priorClaim) { const other = document.createElement('button'); other.type = 'button'; other.className = 'secondary-button'; other.textContent = 'Use a new human identity'; other.addEventListener('click', () => { signOut(); sessionStorage.setItem('workspace_invitation', code); openInvitation(code); }); content.append(other); }
+      if (existing && !priorClaim) { const other = document.createElement('button'); other.type = 'button'; other.className = 'secondary-button'; other.textContent = 'Use a new human identity'; other.addEventListener('click', async () => { if (await signOut()) { sessionStorage.setItem('workspace_invitation', code); openInvitation(code); } }); content.append(other); }
     } catch (e) { if (generation !== state.authGeneration) return; const error = document.createElement('p'); error.className = 'form-error'; error.textContent = e.message; content.append(error); const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'secondary-button'; retry.textContent = 'Try again'; retry.addEventListener('click', () => openInvitation(code)); content.append(retry); }
     content.append(cancel);
   }
@@ -522,11 +589,13 @@
   $('#signin-form').addEventListener('submit', e => { e.preventDefault(); signIn($('#token-input').value); });
   $('#toggle-token').addEventListener('click', () => { const input = $('#token-input'); const shown = input.type === 'text'; input.type = shown ? 'password' : 'text'; $('#toggle-token').textContent = shown ? 'Show' : 'Hide'; $('#toggle-token').setAttribute('aria-label', shown ? 'Show token' : 'Hide token'); });
   $('#signout').addEventListener('click', () => signOut()); ui.composer.addEventListener('submit', sendMessage); ui.input.addEventListener('input', updateComposer); ui.input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ui.composer.requestSubmit(); } });
-  $('#account-button').addEventListener('click', () => showMembers());
+  $('#account-button').addEventListener('click', showAccount);
+  $('#use-token').addEventListener('click', () => { const form = $('#signin-form'); form.hidden = !form.hidden; $('#use-token').setAttribute('aria-expanded', String(!form.hidden)); });
+  $('#password-signin-form').addEventListener('submit', async event => { event.preventDefault(); const button = event.currentTarget.querySelector('[type=submit]'); button.disabled = true; try { await passwordSignIn($('#login-handle').value, $('#login-password').value, $('#login-remember').checked); } finally { button.disabled = false; } });
   const savedToken = state.token;
   renderCredentialRecovery();
   window.addEventListener('hashchange', () => { const code = new URLSearchParams(location.hash.slice(1)).get('invite'); if (code) { sessionStorage.setItem('workspace_invitation', code); history.replaceState(null, '', location.pathname + location.search); openInvitation(code); } });
   const invitationCode = new URLSearchParams(location.hash.slice(1)).get('invite') || sessionStorage.getItem('workspace_invitation');
   if (invitationCode) { sessionStorage.setItem('workspace_invitation', invitationCode); history.replaceState(null, '', location.pathname + location.search); openInvitation(invitationCode); }
-  else if (savedToken) signIn(savedToken); else { ui.signin.hidden = false; ui.workspace.hidden = true; }
+  else restoreSession();
 })();

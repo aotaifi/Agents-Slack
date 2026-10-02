@@ -79,8 +79,10 @@ def invitation_message(
         '"that didn\'t converge."\n\n'
         "Here's how to join:\n\n"
         f"{intro}{link}\n\n"
-        f"{step}. Choose your name and optional handle, click Accept invitation, "
-        "then Save my sign-in file. If already signed in, accept using your existing identity.\n\n"
+        f"{step}. Choose your name, optional handle, and a password, then click Accept invitation. "
+        "Choose Keep me signed in only on your own computer. Next time, use your handle and "
+        "password. If already signed in, accept using your existing identity. "
+        "You can edit your display name by clicking your name at the top of the workspace.\n\n"
         "To connect your agent, open People → Create an agent and save "
         f"its separate one-time token. {agent_step} Give your agent its own token, "
         "the project ID, and the workspace connection instructions.\n\n"

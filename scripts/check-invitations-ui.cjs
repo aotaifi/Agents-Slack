@@ -9,8 +9,8 @@ const { JSDOM } = process.env.JSDOM_PATH
 const directory = path.resolve(__dirname, '../src/agent_commons/static');
 const source = fs.readFileSync(path.join(directory, 'app.js'), 'utf8');
 const html = fs.readFileSync(path.join(directory, 'index.html'), 'utf8');
-const owner = { id: 'owner', name: 'Owner', handle: 'owner', kind: 'human', is_admin: true };
-const guest = { id: 'guest', name: 'Alex', handle: 'alex', kind: 'human', is_admin: false };
+const owner = { id: 'owner', name: 'Owner', handle: 'owner', kind: 'human', is_admin: true, has_password: true };
+const guest = { id: 'guest', name: 'Alex', handle: 'alex', kind: 'human', is_admin: false, has_password: true };
 const project = { id: 'project', name: '<img src=x onerror=alert(1)>', description: '' };
 const code = 'c'.repeat(43);
 const invitation = { id: 'invite', code, role: 'guest', used: false, revoked: false, expires_at: '2099-01-01T00:00:00Z' };
@@ -22,7 +22,7 @@ function setup(url = 'http://127.0.0.1:8000/', token = '', emailEnabled = true) 
   w.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
   w.HTMLDialogElement.prototype.close = function () { this.open = false; };
   w.setInterval = () => 1; w.clearInterval = () => {};
-  let signedIn = token ? owner : guest; const requests = []; let members = [{ actor: owner, role: 'owner' }];
+  let signedIn = token ? owner : null; const requests = []; let members = [{ actor: owner, role: 'owner' }];
   if (token) w.sessionStorage.setItem('commons_token', token);
   w.fetch = async (url, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : undefined;
@@ -31,7 +31,9 @@ function setup(url = 'http://127.0.0.1:8000/', token = '', emailEnabled = true) 
     if (url === '/v1/connection') data = { ssh_host: 'lab.example.test', ssh_app_port: 18000, local_port: 8002, email_enabled: emailEnabled };
     else if (url === '/v1/invitations/preview') data = { project, role: 'guest', expires_at: invitation.expires_at };
     else if (url === '/v1/invitations/accept') { signedIn = guest; members.push({ actor: guest, role: 'guest' }); data = { actor: guest, token: token ? null : 'guest-token', project, role: 'guest' }; }
-    else if (url === '/v1/me') data = signedIn;
+    else if (url === '/v1/auth/login') { signedIn = guest; data = { actor: guest }; }
+    else if (url === '/v1/auth/logout') { signedIn = null; return { status: 204, ok: true }; }
+    else if (url === '/v1/me') { if (!signedIn) return { status: 401, ok: false, json: async () => ({}) }; data = signedIn; }
     else if (url === '/v1/projects') data = { items: [project] };
     else if (url === '/v1/actors') data = { items: [owner, guest] };
     else if (url.endsWith('/role')) { members.find(m => url.includes(`/members/${m.actor.id}/`)).role = body.role; data = {}; }
@@ -44,7 +46,7 @@ function setup(url = 'http://127.0.0.1:8000/', token = '', emailEnabled = true) 
   return { dom, w, requests, setMembers: values => { members = values; } };
 }
 (async () => {
-  const admin = setup(); const { w, requests } = admin; const api = w.__invitationTest;
+  const admin = setup(); await flush(); const { w, requests } = admin; const api = w.__invitationTest;
   api.state.me = owner; api.state.token = 'owner-token'; api.state.project = project;
   await api.showMembers();
   const inviteButton = [...w.document.querySelectorAll('button')].find(b => b.textContent === 'Invite researcher');
@@ -60,7 +62,7 @@ function setup(url = 'http://127.0.0.1:8000/', token = '', emailEnabled = true) 
   assert.match(instructions, /YOUR_UNIVERSITY_USERNAME@lab\.example\.test/);
   assert.match(instructions, /127\.0\.0\.1:8002:127\.0\.0\.1:18000/);
   assert.match(instructions, new RegExp(`http://127\\.0\\.0\\.1:8002/#invite=${code}`));
-  assert.match(instructions, /Accept invitation/); assert.match(instructions, /Save my sign-in file/); assert.match(instructions, /Create an agent/);
+  assert.match(instructions, /Accept invitation/); assert.match(instructions, /password/); assert.match(instructions, /Create an agent/);
   const draft = w.document.querySelector('a[href^="mailto:"]'); const draftUrl = new URL(draft.href);
   assert.equal(decodeURIComponent(draftUrl.pathname), 'alex+lab@example.test');
   assert.equal(draftUrl.searchParams.get('body').replace(/\r\n/g, '\n'), instructions);
@@ -97,7 +99,7 @@ function setup(url = 'http://127.0.0.1:8000/', token = '', emailEnabled = true) 
   admin.dom.window.close();
 
   const disabledMail = setup('https://workspace.example.test/', '', false);
-  disabledMail.w.__invitationTest.state.me = owner; disabledMail.w.__invitationTest.state.token = 'owner-token'; disabledMail.w.__invitationTest.state.project = project;
+  await flush(); disabledMail.w.__invitationTest.state.me = owner; disabledMail.w.__invitationTest.state.token = 'owner-token'; disabledMail.w.__invitationTest.state.project = project;
   await disabledMail.w.__invitationTest.createInvitation(project.id);
   disabledMail.w.document.querySelector('#modal-content form').dispatchEvent(new disabledMail.w.Event('submit', { bubbles: true, cancelable: true })); await flush();
   assert.equal(disabledMail.w.document.querySelector('[name=recipient]'), null);
@@ -114,17 +116,18 @@ function setup(url = 'http://127.0.0.1:8000/', token = '', emailEnabled = true) 
   assert.equal(joining.w.document.querySelector('#invitation-content img'), null, 'project name is text');
   joining.w.document.querySelector('#invitation-content [name=name]').value = 'Alex';
   joining.w.document.querySelector('#invitation-content [name=handle]').value = 'alex';
+  joining.w.document.querySelector('#invitation-content [name=password]').value = 'chosen invitation password';
+  if (joining.w.document.querySelector('#invitation-content [name=confirm_password]')) joining.w.document.querySelector('#invitation-content [name=confirm_password]').value = 'chosen invitation password';
   joining.w.document.querySelector('#invitation-content form').dispatchEvent(new joining.w.Event('submit', { bubbles: true, cancelable: true })); await flush();
   const accepted = joining.requests.find(r => r.url === '/v1/invitations/accept');
-  assert.deepEqual({ ...accepted.body, claim_secret: undefined }, { code, name: 'Alex', handle: 'alex', claim_secret: undefined });
+  assert.deepEqual({ ...accepted.body, claim_secret: undefined }, { code, name: 'Alex', handle: 'alex', password: 'chosen invitation password', claim_secret: undefined });
   assert.match(accepted.body.claim_secret, /^[0-9a-f]{64}$/);
   assert.equal(accepted.headers.has('Authorization'), false);
-  assert.equal(joining.w.sessionStorage.getItem('commons_token'), 'guest-token');
+  assert.equal(joining.w.sessionStorage.getItem('commons_token'), null);
   assert.equal(joining.w.sessionStorage.getItem('workspace_invitation'), null);
   assert.equal(joining.w.document.querySelector('#invitation-view').hidden, true);
-  assert.match(joining.w.document.querySelector('#modal-title').textContent, /Save your sign-in/);
-  assert.ok([...joining.w.document.querySelectorAll('button')].some(b => b.textContent === 'Save my sign-in file'));
-  joining.w.document.querySelector('#signout').click();
+  assert.notEqual(joining.w.document.querySelector('#modal-title').textContent, 'Save your sign-in');
+  joining.w.document.querySelector('#signout').click(); await flush();
   assert.equal(joining.w.sessionStorage.getItem('commons_token'), null);
   assert.equal(joining.w.sessionStorage.getItem('workspace_invitation_claims'), null);
   assert.equal(joining.w.document.querySelector('#credential-recovery').hidden, true, 'sign-out discards pending credentials and claim secrets');
@@ -143,6 +146,8 @@ function setup(url = 'http://127.0.0.1:8000/', token = '', emailEnabled = true) 
   const originalFetch = late.w.fetch; let release;
   late.w.fetch = (url, options) => url === '/v1/invitations/accept' ? new Promise(resolve => { release = async () => resolve(await originalFetch(url, options)); }) : originalFetch(url, options);
   late.w.document.querySelector('#invitation-content [name=name]').value = 'Alex';
+  late.w.document.querySelector('#invitation-content [name=password]').value = 'chosen invitation password';
+  if (late.w.document.querySelector('#invitation-content [name=confirm_password]')) late.w.document.querySelector('#invitation-content [name=confirm_password]').value = 'chosen invitation password';
   late.w.document.querySelector('#invitation-content form').dispatchEvent(new late.w.Event('submit', { bubbles: true, cancelable: true })); await flush();
   const newerCode = 'n'.repeat(43); late.w.sessionStorage.setItem('workspace_invitation', newerCode);
   await late.w.__invitationTest.openInvitation(newerCode); await release(); await flush();
@@ -157,6 +162,8 @@ function setup(url = 'http://127.0.0.1:8000/', token = '', emailEnabled = true) 
   const logoutFetch = logout.w.fetch; let completeAfterLogout;
   logout.w.fetch = (url, options) => url === '/v1/invitations/accept' ? new Promise(resolve => { completeAfterLogout = async () => resolve(await logoutFetch(url, options)); }) : logoutFetch(url, options);
   logout.w.document.querySelector('#invitation-content [name=name]').value = 'Alex';
+  logout.w.document.querySelector('#invitation-content [name=password]').value = 'chosen invitation password';
+  if (logout.w.document.querySelector('#invitation-content [name=confirm_password]')) logout.w.document.querySelector('#invitation-content [name=confirm_password]').value = 'chosen invitation password';
   logout.w.document.querySelector('#invitation-content form').dispatchEvent(new logout.w.Event('submit', { bubbles: true, cancelable: true })); await flush();
   logout.w.document.querySelector('#signout').click(); await completeAfterLogout(); await flush();
   assert.equal(logout.w.sessionStorage.getItem('commons_token'), null);
@@ -164,11 +171,11 @@ function setup(url = 'http://127.0.0.1:8000/', token = '', emailEnabled = true) 
   assert.equal(logout.w.document.querySelector('#invitation-view').hidden, true);
   logout.dom.window.close();
 
-  const parsing = setup(); parsing.w.__invitationTest.state.token = 'existing-token';
+  const parsing = setup(); await flush(); parsing.w.__invitationTest.state.token = 'existing-token';
   const parsingFetch = parsing.w.fetch; let parsed;
   parsing.w.fetch = (url, options) => url === '/v1/me' ? Promise.resolve({ ok: true, status: 200, json: () => new Promise(resolve => { parsed = () => resolve(owner); }) }) : parsingFetch(url, options);
   const opening = parsing.w.__invitationTest.openInvitation(code); await flush();
-  parsing.w.document.querySelector('#signout').click(); parsed(); await opening;
+  parsing.w.document.querySelector('#signout').click(); parsed(); await opening; await flush();
   assert.equal(parsing.w.__invitationTest.state.me, null, 'late identity body cannot overwrite sign-out');
   assert.equal(parsing.w.document.querySelector('#invitation-view').hidden, true);
   parsing.dom.window.close();
@@ -182,15 +189,21 @@ function setup(url = 'http://127.0.0.1:8000/', token = '', emailEnabled = true) 
     return response;
   };
   lost.w.document.querySelector('#invitation-content [name=name]').value = 'Alex';
+  lost.w.document.querySelector('#invitation-content [name=password]').value = 'chosen invitation password';
+  if (lost.w.document.querySelector('#invitation-content [name=confirm_password]')) lost.w.document.querySelector('#invitation-content [name=confirm_password]').value = 'chosen invitation password';
   lost.w.document.querySelector('#invitation-content form').dispatchEvent(new lost.w.Event('submit', { bubbles: true, cancelable: true })); await flush();
   const firstClaim = JSON.parse(lost.w.sessionStorage.getItem('workspace_invitation_claims'))[code].body;
   assert.equal(lost.w.sessionStorage.getItem('commons_token'), null);
   await lost.w.__invitationTest.openInvitation(code);
   assert.equal(lost.w.document.querySelector('#invitation-content [name=name]').value, 'Alex');
+  lost.w.document.querySelector('#invitation-content [name=password]').value = 'chosen invitation password';
+  if (lost.w.document.querySelector('#invitation-content [name=confirm_password]')) lost.w.document.querySelector('#invitation-content [name=confirm_password]').value = 'chosen invitation password';
   lost.w.document.querySelector('#invitation-content form').dispatchEvent(new lost.w.Event('submit', { bubbles: true, cancelable: true })); await flush();
+  assert.equal(lost.w.document.querySelector('#invitation-content [name=confirm_password]'), null);
+  assert.ok(!JSON.stringify(firstClaim).includes('password'));
   const retry = lost.requests.filter(r => r.url === '/v1/invitations/accept')[1];
   assert.deepEqual(retry.body, firstClaim, 'recovery uses the persisted private operation secret and original body');
-  assert.equal(lost.w.sessionStorage.getItem('commons_token'), 'guest-token');
+  assert.equal(lost.w.sessionStorage.getItem('commons_token'), null);
   lost.dom.window.close();
   process.stdout.write('Invitation DOM checks passed: roles, SSH steps, fragment secrecy, signup, existing identity, late responses and lost-response recovery.\n');
 })().catch(error => { console.error(error); process.exit(1); });

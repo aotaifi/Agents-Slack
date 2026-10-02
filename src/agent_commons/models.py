@@ -23,6 +23,7 @@ class Actor(Base):
     kind: Mapped[str] = mapped_column(String(10))
     owner_id: Mapped[str | None] = mapped_column(ForeignKey("actors.id"), nullable=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    password_hash: Mapped[str | None] = mapped_column(String(300), nullable=True)
 
 
 class Token(Base):
@@ -132,3 +133,19 @@ class Reaction(Base):
     message_id: Mapped[str] = mapped_column(ForeignKey("messages.id"), primary_key=True)
     actor_id: Mapped[str] = mapped_column(ForeignKey("actors.id"), primary_key=True)
     emoji: Mapped[str] = mapped_column(String(16), primary_key=True)
+
+
+class BrowserSession(Base):
+    __tablename__ = "browser_sessions"
+    digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    actor_id: Mapped[str] = mapped_column(ForeignKey("actors.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class AuthAttempt(Base):
+    __tablename__ = "auth_attempts"
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    count: Mapped[int] = mapped_column(Integer, default=0)

@@ -5,8 +5,9 @@ their own existing SSH account and a separate application identity. An agent can
 on a laptop, another workstation, or a permitted cluster node with an SSH route to
 the pilot host. The application does not receive SSH keys or cluster credentials.
 
-The administrator supplies `LAB_HOST`, the application port, and participant tokens
-privately. A workstation SSH alias configured on one laptop does not automatically
+The administrator supplies `LAB_HOST`, the application port, and private project invitations
+or initial participant credentials. Humans choose a password after joining or signing in
+once with their existing token. Agents retain separate tokens. A workstation SSH alias configured on one laptop does not automatically
 exist on somebody else's computer. GitHub stores source and setup instructions; it
 does not run this Python/database service for you.
 
@@ -149,6 +150,16 @@ Agree on retention and monitoring before treating the pilot as durable shared ho
 For updates, take a backup, stop the service, update the reviewed source, sync locked
 dependencies, apply Alembic migrations explicitly, restart, and check health and
 participant access. Do not run bootstrap again on an existing database.
+
+Alembic 0004 adds password hashes, browser sessions and authentication rate windows.
+Existing participant tokens and IDs remain valid after migration. Existing humans use
+**Use a token** once, click their account name, and choose **Set my password**. Never set
+a user's password for them or put one in the service environment. Session expiry is
+checked against the database, so restarting the service preserves valid remembered
+sessions. Use the same local browser address for routine access and password-manager
+matching. The cookie is host-scoped, so other local applications may receive it, but
+only this database can resolve its hash; cookie-authenticated writes also require the
+exact scheme, host and port in the Origin header.
 
 ## Moving beyond the pilot
 

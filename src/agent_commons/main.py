@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select, text, update
@@ -18,6 +19,8 @@ from .identity import choose_handle
 from .invitation_email import MailUnavailable, email_enabled, invitation_message, submit_invitation
 from .models import (
     Actor,
+    AuthAttempt,
+    BrowserSession,
     Channel,
     Event,
     Idempotency,
@@ -37,17 +40,19 @@ from .schemas import (
     InvitationCode,
     InvitationEmail,
     InvitationInput,
+    LoginInput,
     MemberInput,
     MemberRoleInput,
     MessageInput,
     MuteInput,
     Named,
+    PasswordInput,
     ProjectInput,
     ReactionInput,
     RulesInput,
     ThreadInput,
 )
-from .security import digest, issue_token
+from .security import digest, hash_password, issue_token, verify_password
 
 
 def actor_json(a):
@@ -57,6 +62,10 @@ def actor_json(a):
         **{k: getattr(a, k) for k in ("id", "name", "handle", "kind", "owner_id", "is_admin")},
         "owner": {k: getattr(owner, k) for k in ("id", "name", "handle")} if owner else None,
     }
+
+
+def self_actor_json(a):
+    return {**actor_json(a), "has_password": a.password_hash is not None}
 
 
 def reaction_actor(a):
@@ -135,6 +144,8 @@ def create_app(database_url: str | None = None):
     app.state.engine = engine
     app.state.session_factory = factory
     app.state.posting_limit = int(os.environ.get("POSTING_RATE_LIMIT", "60"))
+    app.state.auth_account_limit = 5
+    app.state.auth_ip_limit = 100
 
     def session(request: Request):
         with factory() as db:
@@ -152,16 +163,137 @@ def create_app(database_url: str | None = None):
                 db.rollback()
                 raise
 
+    def same_origin(request, required=True):
+        origin = request.headers.get("origin")
+        expected = f"{request.url.scheme}://{request.url.netloc}"
+        if (origin is None and required) or (origin is not None and origin != expected):
+            raise HTTPException(403, "Same-origin request required")
+
+    def resolve_identity(request, authorization, db):
+        # Explicit bearer credentials never silently fall back to another identity.
+        if authorization:
+            if not authorization.startswith("Bearer ") or len(authorization) > 512:
+                raise HTTPException(401, "Invalid or revoked token")
+            token = db.get(Token, digest(authorization[7:]), populate_existing=True)
+            if token is None or token.revoked:
+                raise HTTPException(401, "Invalid or revoked token")
+            actor = db.get(Actor, token.actor_id)
+        else:
+            raw = request.cookies.get("workspace_session")
+            if not raw or len(raw) > 128:
+                raise HTTPException(401, "Sign in required")
+            credential = db.get(BrowserSession, digest(raw), populate_existing=True)
+            if credential is None or credential.revoked or utc(credential.expires_at) <= now():
+                raise HTTPException(401, "Session expired or revoked")
+            actor = db.get(Actor, credential.actor_id)
+            if actor is None or actor.kind != "human":
+                raise HTTPException(401, "Invalid session")
+            if request.method not in {"GET", "HEAD", "OPTIONS"}:
+                same_origin(request)
+        request.state.actor_handle = actor.handle
+        return actor
+
     def authenticated(
+        request: Request,
         authorization: str | None = Header(default=None),
         db: Session = Depends(session, scope="function"),
     ):
-        if not authorization or not authorization.startswith("Bearer "):
-            raise HTTPException(401, "Bearer token required")
-        token = db.get(Token, digest(authorization[7:]))
-        if token is None or token.revoked:
-            raise HTTPException(401, "Invalid or revoked token")
-        return db.get(Actor, token.actor_id)
+        return resolve_identity(request, authorization, db)
+
+    def consume_auth_rate(db, request, handle):
+        # Persist attempts before a failure is raised; the request rollback must not
+        # erase brute-force counters. This short lock is released before scrypt.
+        if engine.dialect.name == "postgresql":
+            db.execute(text("SELECT pg_advisory_xact_lock(731958241)"))
+        current = now()
+        ip = request.client.host if request.client else "unknown"
+        windows = []
+        for label, value, limit in (
+            ("account", handle.lower(), app.state.auth_account_limit),
+            ("ip", ip, app.state.auth_ip_limit),
+        ):
+            key = digest(label + ":" + value)
+            window = db.get(AuthAttempt, key)
+            if window is None:
+                window = AuthAttempt(key=key, started_at=current, count=0)
+                db.add(window)
+            elapsed = (current - utc(window.started_at)).total_seconds()
+            if elapsed >= 60:
+                window.started_at, window.count = current, 0
+            if window.count >= limit:
+                db.commit()
+                raise HTTPException(
+                    429,
+                    "Authentication rate limit exceeded",
+                    headers={"Retry-After": str(max(1, int(60 - elapsed) + 1))},
+                )
+            windows.append(window)
+        for window in windows:
+            window.count += 1
+        db.commit()
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request, error):
+        # Pydantic includes rejected input by default, including password strings.
+        # Keep the useful location/message while dropping values and contexts.
+        if request.url.path in {"/v1/auth/login", "/v1/auth/password"}:
+            try:
+                same_origin(
+                    request,
+                    required=(
+                        request.url.path == "/v1/auth/login"
+                        or not request.headers.get("authorization")
+                    ),
+                )
+            except HTTPException as forbidden:
+                return JSONResponse({"detail": forbidden.detail}, status_code=forbidden.status_code)
+            body = error.body if isinstance(error.body, dict) else {}
+            handle = body.get("handle") or getattr(request.state, "actor_handle", "invalid")
+            handle = handle[:130] if isinstance(handle, str) else "invalid"
+            with factory() as db:
+                if engine.dialect.name == "sqlite":
+                    db.execute(text("BEGIN IMMEDIATE"))
+                try:
+                    consume_auth_rate(db, request, handle)
+                except HTTPException as limited:
+                    return JSONResponse(
+                        {"detail": limited.detail},
+                        status_code=limited.status_code,
+                        headers=limited.headers,
+                    )
+        errors = [
+            {k: item[k] for k in ("type", "loc", "msg") if k in item} for item in error.errors()
+        ]
+        return JSONResponse({"detail": errors}, status_code=422)
+
+    def lock_auth_actor(db, actor_id):
+        if engine.dialect.name == "sqlite":
+            db.rollback()
+            db.execute(text("BEGIN IMMEDIATE"))
+        return db.scalar(
+            select(Actor)
+            .where(Actor.id == actor_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+
+    def issue_browser_session(db, actor, response, request, remember):
+        seconds = 30 * 24 * 60 * 60 if remember else 12 * 60 * 60
+        raw = secrets.token_urlsafe(32)
+        db.add(
+            BrowserSession(
+                digest=digest(raw), actor_id=actor.id, expires_at=now() + timedelta(seconds=seconds)
+            )
+        )
+        response.set_cookie(
+            "workspace_session",
+            raw,
+            max_age=seconds if remember else None,
+            path="/v1",
+            httponly=True,
+            secure=request.url.scheme == "https",
+            samesite="strict",
+        )
 
     def human(a):
         if a.kind != "human":
@@ -226,7 +358,87 @@ def create_app(database_url: str | None = None):
 
     @app.get("/v1/me")
     def me(a=Depends(authenticated, scope="function")):
-        return actor_json(a)
+        return self_actor_json(a)
+
+    @app.patch("/v1/me")
+    def edit_profile(
+        body: Named,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        human(a)
+        a.name = body.name
+        db.flush()
+        return self_actor_json(a)
+
+    @app.post("/v1/auth/login")
+    def login(
+        body: LoginInput,
+        request: Request,
+        response: Response,
+        db: Session = Depends(session, scope="function"),
+    ):
+        same_origin(request)
+        consume_auth_rate(db, request, body.handle)
+        actor = db.scalar(select(Actor).where(Actor.handle == body.handle))
+        previous_hash = actor.password_hash if actor and actor.kind == "human" else None
+        valid = verify_password(body.password, previous_hash)
+        if not valid:
+            raise HTTPException(401, "Invalid handle or password")
+        actor = lock_auth_actor(db, actor.id)
+        # Login cannot mint a session using a password revoked/changed during scrypt.
+        if actor.password_hash != previous_hash:
+            raise HTTPException(401, "Invalid handle or password")
+        issue_browser_session(db, actor, response, request, body.remember)
+        return {"actor": self_actor_json(actor)}
+
+    @app.post("/v1/auth/password")
+    def set_password(
+        body: PasswordInput,
+        request: Request,
+        response: Response,
+        authorization: str | None = Header(default=None),
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        human(a)
+        same_origin(request, required=not bool(authorization))
+        actor_id, handle = a.id, a.handle
+        consume_auth_rate(db, request, handle)
+        db.refresh(a)
+        previous_hash = a.password_hash
+        if previous_hash and not verify_password(body.current_password or "", previous_hash):
+            raise HTTPException(401, "Current password is incorrect")
+        new_hash = hash_password(body.password)
+        actor = lock_auth_actor(db, actor_id)
+        resolve_identity(request, authorization, db)
+        if actor.password_hash != previous_hash:
+            raise HTTPException(409, "Password changed during request; retry")
+        actor.password_hash = new_hash
+        db.execute(
+            update(BrowserSession).where(BrowserSession.actor_id == actor.id).values(revoked=True)
+        )
+        issue_browser_session(db, actor, response, request, body.remember)
+        return {"actor": self_actor_json(actor)}
+
+    @app.post("/v1/auth/logout")
+    def logout(
+        request: Request, response: Response, db: Session = Depends(session, scope="function")
+    ):
+        same_origin(request)
+        raw = request.cookies.get("workspace_session")
+        if raw and len(raw) <= 128:
+            credential = db.get(BrowserSession, digest(raw))
+            if credential:
+                credential.revoked = True
+        response.delete_cookie(
+            "workspace_session",
+            path="/v1",
+            httponly=True,
+            secure=request.url.scheme == "https",
+            samesite="strict",
+        )
+        return {"status": "ok"}
 
     @app.get("/v1/connection")
     def connection():
@@ -390,9 +602,28 @@ def create_app(database_url: str | None = None):
     @app.post("/v1/invitations/accept", status_code=201)
     def accept_invitation(
         body: InvitationAccept,
+        request: Request,
         authorization: str | None = Header(default=None),
         db: Session = Depends(session, scope="function"),
     ):
+        new_password_hash = None
+        anonymous_password = (
+            body.password is not None
+            and not authorization
+            and not request.cookies.get("workspace_session")
+        )
+        if body.password is not None:
+            same_origin(request)
+            if anonymous_password:
+                consume_auth_rate(db, request, "invite:" + body.code)
+                pending, _ = valid_invitation(db, body.code, claim_secret=body.claim_secret)
+                if pending.used_at is None:
+                    new_password_hash = hash_password(body.password)
+        if not authorization and request.cookies.get("workspace_session"):
+            same_origin(request)
+        if anonymous_password and engine.dialect.name == "sqlite":
+            db.rollback()
+            db.execute(text("BEGIN IMMEDIATE"))
         invitation, project = valid_invitation(
             db, body.code, lock=True, claim_secret=body.claim_secret
         )
@@ -403,7 +634,7 @@ def create_app(database_url: str | None = None):
                 if not hmac.compare_digest(digest(token), invitation.issued_token_digest):
                     raise HTTPException(410, "Invitation credential unavailable")
             else:
-                authenticated_actor = authenticated(authorization, db)
+                authenticated_actor = resolve_identity(request, authorization, db)
                 human(authenticated_actor)
                 if authenticated_actor.id != actor.id:
                     raise HTTPException(
@@ -418,11 +649,11 @@ def create_app(database_url: str | None = None):
                 "role": member.role,
             }
         token = None
-        if authorization:
-            actor = authenticated(authorization, db)
+        if authorization or request.cookies.get("workspace_session"):
+            actor = resolve_identity(request, authorization, db)
             human(actor)
-            if body.name is not None or body.handle is not None:
-                raise HTTPException(422, "Existing identities keep their name and handle")
+            if body.name is not None or body.handle is not None or body.password is not None:
+                raise HTTPException(422, "Existing identities keep their profile and password")
         else:
             if body.claim_secret is None:
                 raise HTTPException(
@@ -438,7 +669,13 @@ def create_app(database_url: str | None = None):
                 raise HTTPException(422, str(error)) from None
             except FileExistsError:
                 raise HTTPException(409, "Handle already exists; choose another") from None
-            actor = Actor(name=body.name.strip(), handle=handle, kind="human", is_admin=False)
+            actor = Actor(
+                name=body.name.strip(),
+                handle=handle,
+                kind="human",
+                is_admin=False,
+                password_hash=new_password_hash,
+            )
             db.add(actor)
             db.flush()
             token = issue_token(db, actor, claim_token(body))
@@ -505,10 +742,22 @@ def create_app(database_url: str | None = None):
         db: Session = Depends(session, scope="function"),
     ):
         human(a)
-        target = db.get(Actor, actor_id)
+        target = db.scalar(
+            select(Actor)
+            .where(Actor.id == actor_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         if target is None or not (a.is_admin or target.owner_id == a.id or target.id == a.id):
             raise HTTPException(404, "Actor not found")
         db.execute(update(Token).where(Token.actor_id == actor_id).values(revoked=True))
+        if target.kind == "human":
+            target.password_hash = None
+            db.execute(
+                update(BrowserSession)
+                .where(BrowserSession.actor_id == actor_id)
+                .values(revoked=True)
+            )
         return Response(status_code=204)
 
     @app.get("/v1/projects")
@@ -1065,8 +1314,10 @@ def create_app(database_url: str | None = None):
 
         @app.get("/", include_in_schema=False)
         def index():
-            html = (static / "index.html").read_text().replace(
-                'src="/static/app.js"', f'src="/static/app.js?v={script_version}"'
+            html = (
+                (static / "index.html")
+                .read_text()
+                .replace('src="/static/app.js"', f'src="/static/app.js?v={script_version}"')
             )
             return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
