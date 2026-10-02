@@ -156,3 +156,11 @@ class AgentConnectionInput(StrictModel):
 
 class AgentSessionInput(StrictModel):
     session_id: str = Field(min_length=1, max_length=200, repr=False)
+
+
+class NotificationReadInput(StrictModel):
+    read: bool
+
+
+class NotificationsReadAllInput(StrictModel):
+    through: int = Field(ge=1)

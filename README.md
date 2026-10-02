@@ -66,6 +66,8 @@ Use People to create an owned agent, copy its one-time token, and add it to your
 
 To deliver mentions to one selected Claude Code session, use **People → Connect session** beside your own agent. Download the private project-scoped connection file and follow [the session setup guide](docs/claude-session.md). Only the session launched with the generated settings receives notifications; other sessions keep their existing settings.
 
+Humans have an **Inbox** for new structured mentions across their accessible projects. Its badge counts unread mentions; listing or polling does not mark them read. Open a message from the inbox to read it, or explicitly mark an item or the displayed snapshot read. Read state persists across browsers and restarts. This first version uses notifications inside the workspace; email alerts and desktop popups are not enabled.
+
 **Verify changes**
 
 ```sh
@@ -83,6 +85,7 @@ JSDOM_PATH="$PWD/.local/ui-check/node_modules/jsdom" node scripts/check-invitati
 JSDOM_PATH="$PWD/.local/ui-check/node_modules/jsdom" node scripts/check-name-editing-ui.cjs
 JSDOM_PATH="$PWD/.local/ui-check/node_modules/jsdom" node scripts/check-account-ui.cjs
 JSDOM_PATH="$PWD/.local/ui-check/node_modules/jsdom" node scripts/check-agent-connections-ui.cjs
+JSDOM_PATH="$PWD/.local/ui-check/node_modules/jsdom" node scripts/check-human-inbox-ui.cjs
 ```
 
 This checks reply expansion and parent targeting, reactions, handle and owner labels, safe long-message rendering, and draft preservation during updates. It does not replace the browser smoke check below.
@@ -115,6 +118,7 @@ If using the cloud overlay, include it when starting the database. GitHub Action
 - One-level message replies, attributed emoji reactions, and expandable long messages.
 - Filtered agent inboxes and recent context with explicit text budgets and truncation markers.
 - Project-scoped agent connection credentials, exclusive session leases, and opt-in Claude Code mention notifications.
+- A persistent human mention inbox with unread counts and conversation navigation across accessible projects.
 - A responsive browser interface and independent generic HTTP clients.
 
 **Agent participation**

@@ -28,7 +28,8 @@ function setup(url = 'http://127.0.0.1:8000/', token = '', emailEnabled = true) 
     const body = options.body ? JSON.parse(options.body) : undefined;
     requests.push({ url, method: options.method || 'GET', body, headers: options.headers });
     let data;
-    if (url === '/v1/connection') data = { ssh_host: 'lab.example.test', ssh_app_port: 18000, local_port: 8002, email_enabled: emailEnabled };
+    if (url.startsWith('/v1/notifications?')) data = { items: [], next_cursor: null, cursor: null, unread_count: 0 };
+    else if (url === '/v1/connection') data = { ssh_host: 'lab.example.test', ssh_app_port: 18000, local_port: 8002, email_enabled: emailEnabled };
     else if (url === '/v1/invitations/preview') data = { project, role: 'guest', expires_at: invitation.expires_at };
     else if (url === '/v1/invitations/accept') { signedIn = guest; members.push({ actor: guest, role: 'guest' }); data = { actor: guest, token: token ? null : 'guest-token', project, role: 'guest' }; }
     else if (url === '/v1/auth/login') { signedIn = guest; data = { actor: guest }; }

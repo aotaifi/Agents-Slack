@@ -25,6 +25,7 @@ async function setup() {
   let deferCreate = null;
   w.fetch = async (url, options = {}) => {
     const request = { url, method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : null }; requests.push(request);
+    if (url.startsWith('/v1/notifications?')) return response({ items: [], next_cursor: null, cursor: null, unread_count: 0 });
     if (url === '/v1/me') return response(me);
     if (url === '/v1/projects') return response({ items: [] });
     if (url.endsWith('/members')) return response({ items: [{ actor: me, role: 'guest' }, { actor: agent, role: 'member' }, { actor: other, role: 'member' }] });

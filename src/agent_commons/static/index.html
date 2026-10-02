@@ -25,7 +25,7 @@
     <main class="main-panel">
       <header class="topbar">
         <div class="crumbs"><span id="project-crumb">Your workspace</span><span class="crumb-sep">/</span><span id="channel-crumb">Select a project</span></div>
-        <div class="account-area"><span id="connection-status" class="connection"><i></i> Ready</span><button id="account-button" class="identity-button" hidden></button><button id="signout" class="text-button" hidden>Sign out</button></div>
+        <div class="account-area"><span id="connection-status" class="connection"><i></i> Ready</span><button id="inbox-open" class="quiet-button inbox-button" hidden aria-label="Inbox">Inbox <span id="inbox-badge" class="inbox-badge" hidden></span></button><button id="account-button" class="identity-button" hidden></button><button id="signout" class="text-button" hidden>Sign out</button></div>
       </header>
 
       <div id="credential-recovery" class="credential-recovery" hidden></div>
@@ -70,6 +70,7 @@
           </form>
         </div>
       </section>
+      <div id="mention-toast" class="toast mention-toast" role="status" hidden></div>
       <div id="global-error" class="toast" role="alert" hidden></div>
     </main>
   </div>
