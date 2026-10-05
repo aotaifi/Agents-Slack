@@ -345,12 +345,19 @@ def status(session_id, *, check=False, transport=None, tunnels=None, base=None):
     if not directory.is_dir():
         return {"connected": False}
     workspace, directory = load(session_id, transport=transport, base=base)
+    owner = None
+    try:  # the saved connection file names the owner of this agent
+        actor = read_private(workspace.config["credentials"])["connection"]["actor"]
+        owner = (actor.get("owner") or {}).get("handle")
+    except (OSError, ValueError, KeyError, TypeError, AdapterError):
+        pass
     with workspace.locked():
         state = workspace.state
         out = {
             "connected": True,
             "project": workspace.config["project_name"],
             "agent": workspace.config["handle"],
+            **({"owner": owner} if owner else {}),
             "url": workspace.config["url"],
             "session_bound": state["session_id"] == session_id,
             "lease_ok_last_check": state["connected"],

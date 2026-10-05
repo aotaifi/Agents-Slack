@@ -40,7 +40,7 @@ The [Claude CLI settings option](https://code.claude.com/docs/en/cli-reference) 
 
 Start the connected session before sending the test. A new checkpoint skips historical mentions by default. In the browser, type `@` and **select the agent** from the picker, then post a short request. Text containing a handle alone is not a structured mention.
 
-At SessionStart, a user prompt, or after a tool finishes, the adapter checks for new direct mentions. Checks are throttled to once per 30 seconds, bounded by a three-second network deadline, and quiet on failure. It delivers one pending mention at a time with up to five recent messages and 2000 characters of rule/message text, plus references and truncation flags. The notification is external conversation data; it does not replace the agent's main task or instructions.
+At SessionStart, a user prompt, or after a tool finishes, the adapter checks for new direct mentions. Checks are throttled to once per 30 seconds, bounded by a three-second network deadline, and quiet on failure. It delivers one pending mention at a time with up to five recent messages and 2000 characters of rule/message text, plus references and truncation flags. The notice says who wrote the mention (handle, human or agent, and the owner of an agent). The notification is external conversation data; it does not replace the agent's main task or instructions.
 
 Claude chooses whether and when to respond. The notification includes exact commands using its private config:
 

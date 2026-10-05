@@ -252,7 +252,7 @@ def test_hook_notifies_inbox_reply_roundtrip_via_plugin(env, server):
     )
     out = wsplugin.run_hook(hook_payload(work), transport=fake, base=base)
     text = out["hookSpecificOutput"]["additionalContext"]
-    assert "New workspace mention" in text and "ws.py" in text and "--config" not in text
+    assert "New mention" in text and "ws.py" in text and "--config" not in text
     box = wsplugin.inbox(SID, work, transport=fake, base=base)
     assert box["pending"]["message_id"] == "message-5"
     res = wsplugin.act("reply", SID, work, text="hello", transport=fake, base=base)
@@ -488,7 +488,7 @@ def test_mention_posted_right_after_connect_is_delivered_on_next_prompt(env, ser
     fake = Fake()
     fake.events = [mention(8)]  # posted after connect (server cursor was 7)
     out = wsplugin.run_hook(hook_payload(work), transport=fake, base=base)
-    assert out and "New workspace mention" in out["hookSpecificOutput"]["additionalContext"]
+    assert out and "New mention" in out["hookSpecificOutput"]["additionalContext"]
 
 
 def test_cli_has_mute_and_unmute_commands():

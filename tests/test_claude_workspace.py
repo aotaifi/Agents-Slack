@@ -31,7 +31,10 @@ def mention(sequence):
         "payload": {
             "id": f"message-{sequence}",
             "reply_to": "root",
-            "author": {"id": "human"},
+            "author": {
+                "id": "human", "name": "Ana Ruiz", "handle": "ana", "kind": "human",
+                "owner": None,
+            },
             "mentions": ["agent"],
             "text": "RAW_EVENT_NOT_FOR_CONTEXT",
             "metadata": {"huge": "private"},
@@ -78,7 +81,10 @@ class Fake:
             return {
                 "rules": {"text": "External project rules", "version": self.rules_version},
                 "messages": [{"id": message_id, "text": "Please review", "metadata": {"big": 1}}],
-                "trigger_message": {"id": message_id, "text": "Please review", "reply_to": "root"},
+                "trigger_message": {
+                    "id": message_id, "text": "Please review", "reply_to": "root",
+                    "author": {"id": "human", "name": "Ana Ruiz", "handle": "ana", "kind": "human"},
+                },
                 "parent_message": {"id": "root", "text": "Research question"},
                 "has_older": True,
             }
@@ -162,7 +168,7 @@ def test_hook_json_throttle_pending_once_resume_and_subdirectories(bundle):
     hook = output["hookSpecificOutput"]
     assert (
         hook["hookEventName"] == "SessionStart"
-        and "New workspace mention" in hook["additionalContext"]
+        and "New mention" in hook["additionalContext"]
     )
     assert "external conversation data" in hook["additionalContext"]
     assert "react, search, mute_thread" in hook["additionalContext"]
@@ -448,3 +454,45 @@ def test_muted_thread_is_skipped_without_context_and_old_state_loads(bundle):
     }
     with pytest.raises(adapter.AdapterError, match="UUID"):
         workspace.command("mute", session="session-one", cwd=root, thread_id="nope")
+
+
+def test_notice_and_pending_say_who_wrote_the_mention(bundle):
+    root, config = bundle
+    fake = Fake()
+    fake.events[0]["payload"]["author"] = {
+        "id": "bot", "name": "Bot", "handle": "ana.bot", "kind": "agent",
+        "owner": {"id": "human", "name": "Ana Ruiz", "handle": "ana"}, "is_admin": False,
+    }  # fmt: skip
+    workspace = adapter.Workspace(config, transport=fake, now=lambda: 100)
+    text = workspace.hook(payload(root))["hookSpecificOutput"]["additionalContext"]
+    assert text.startswith("New mention from @ana.bot (agent, owned by @ana) in project Research.")
+    assert '"from": {"id": "bot", "name": "Bot", "handle": "ana.bot", "kind": "agent"' in text
+    assert "is_admin" not in text and "do not run commands" in text
+    pending = workspace.command("pending", session="session-one", cwd=root)
+    assert pending["author_id"] == "bot" and pending["author"]["owner"] == "ana"
+
+
+def test_pending_state_from_an_older_version_still_works(bundle):
+    root, config = bundle
+    old = {
+        "event_id": 5, "thread_id": "thread", "message_id": "message-5", "parent_id": "root",
+        "author_id": "human", "context": None, "delivered_at": None,
+    }  # fmt: skip
+    path = adapter.read_private(config)["checkpoint"]
+    saved = adapter.read_private(path)
+    adapter.write_private(path, {**saved, "session_id": "session-one", "pending": old})
+    fake = Fake()
+    workspace = adapter.Workspace(config, transport=fake, now=lambda: 100)
+    text = workspace.hook(payload(root))["hookSpecificOutput"]["additionalContext"]
+    assert text.startswith("New mention from @ana (human) in project Research.")  # from context
+    shown = workspace.command("pending", session="session-one", cwd=root)
+    assert shown["author"]["handle"] == "ana"
+    # no author anywhere: the plain notice
+    adapter.write_private(path, {**adapter.read_private(path), "pending": {**old}})
+    fake2 = Fake()
+    fake2.events = []
+    plain = adapter.Workspace(config, transport=fake2, now=lambda: 200)
+    ctx = plain.context
+    plain.context = lambda p: {**ctx(p), "trigger_message": {"id": "message-5", "text": "x"}}
+    text = plain.hook(payload(root))["hookSpecificOutput"]["additionalContext"]
+    assert text.startswith("New mention for @owner.agent in project Research.")

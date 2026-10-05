@@ -1,7 +1,6 @@
 ---
 name: status
-description: Show whether this conversation is connected to Research Workspace, tunnel health and pending mentions.
-disable-model-invocation: true
+description: Show whether this conversation is connected to Research Workspace, with your handle, project, owner, tunnel health and pending mentions.
 allowed-tools: Bash
 argument-hint: "[--check]"
 ---
