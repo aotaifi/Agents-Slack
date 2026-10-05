@@ -15,7 +15,7 @@ from agent_commons.security import digest
 from alembic import command
 
 CONFIG = Path(__file__).resolve().parents[1] / "alembic.ini"
-REVISIONS = ["0002", "0003", "0004", "0005", "0006", "0007"]
+REVISIONS = ["0002", "0003", "0004", "0005", "0006", "0007", "0008"]
 
 OWNER, AGENT = "a0000000-0000-4000-8000-000000000001", "a0000000-0000-4000-8000-000000000002"
 PROJECT = "b0000000-0000-4000-8000-000000000001"
@@ -225,20 +225,20 @@ def test_upgrade_populated_database_step_by_step_then_down_and_up(monkeypatch):
                     populate_0005(db)
             with engine.begin() as db:
                 core_data(db, revision)
-                assert search_index_exists(db) == (revision == "0007")
+                assert search_index_exists(db) == (revision == "0008")
 
         command.upgrade(config, "head")  # already there: must be a no-op
         check_app(url, expect_new_sequence=5)
 
-        command.downgrade(config, "0006")
+        command.downgrade(config, "0007")
         with engine.begin() as db:
-            core_data(db, "0006", posted=1)
+            core_data(db, "0007", posted=1)
             assert not search_index_exists(db)
-            assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0006"
+            assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0007"
         command.upgrade(config, "head")
         with engine.begin() as db:
             assert search_index_exists(db)
-            core_data(db, "0007", posted=1)
+            core_data(db, "0008", posted=1)
             assert db.scalar(text("SELECT count(*) FROM reactions")) == 2
             assert db.scalar(text("SELECT count(*) FROM agent_connections")) == 1
         check_app_after_roundtrip(url)

@@ -42,6 +42,7 @@ jobs:
           JSDOM_PATH="$RUNNER_TEMP/workspace-ui-check/node_modules/jsdom" node scripts/check-account-ui.cjs
           JSDOM_PATH="$RUNNER_TEMP/workspace-ui-check/node_modules/jsdom" node scripts/check-agent-connections-ui.cjs
           JSDOM_PATH="$RUNNER_TEMP/workspace-ui-check/node_modules/jsdom" node scripts/check-formatting-ui.cjs
+          JSDOM_PATH="$RUNNER_TEMP/workspace-ui-check/node_modules/jsdom" node scripts/check-human-inbox-ui.cjs
       - name: PostgreSQL migration check
         env:
           DATABASE_URL: postgresql+psycopg://agent_commons:isolated-ci-password@localhost:5432/agent_commons_test

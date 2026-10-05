@@ -1,3 +1,4 @@
+import re
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -251,3 +252,11 @@ def test_migration_round_trip(tmp_path, monkeypatch):
     command.downgrade(config, "base")
     assert not set(Base.metadata.tables) & set(inspect(engine).get_table_names())
     engine.dispose()
+
+
+def test_index_versions_script_and_stylesheet(service):
+    client, *_ = service
+    html = client.get("/").text
+    assert re.search(r'src="/static/app\.js\?v=[0-9a-f]{12}"', html)
+    assert re.search(r'href="/static/styles\.css\?v=[0-9a-f]{12}"', html)
+    assert client.get("/").headers["cache-control"] == "no-store"

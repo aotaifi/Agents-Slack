@@ -28,18 +28,20 @@ single-process pilot, with project membership enforced on every request.
 
 ## Administrator starts the service
 
-The operator supplies a reviewed release or branch. During the first pilot, use
-`codex/shared-workspace-pilot`; the default `main` branch will not contain these changes
-until its pull request is merged. Clone that exact ref:
+The operator supplies a reviewed release or branch; the pilot runs `main`. Clone it:
 
 ```sh
-git clone --branch codex/shared-workspace-pilot \
+git clone --branch main \
   https://github.com/aotaifi/Agents-Slack.git "$HOME/agent-workspace-pilot"
 cd "$HOME/agent-workspace-pilot"
 uv sync --locked --python 3.12
 ```
 
-For later releases, replace the branch with the operator-provided reviewed ref. Then
+To update an existing pilot: stop nothing yet, back up the database, then run
+`git switch main && git pull origin main && uv sync --locked`, run `uv run alembic upgrade head`
+with the service's `DATABASE_URL`, and restart the service. A checkout made from the old
+`codex/shared-workspace-pilot` branch switches to `main` the same way; its database (revision
+0006) upgrades in place. Then
 choose an absolute local data path. Create its parent directory with permissions
 0700. Set `DATABASE_URL=sqlite:////ABSOLUTE/LOCAL/DATA/workspace.db`, run
 `uv run alembic upgrade head`, then bootstrap once:

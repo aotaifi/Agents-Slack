@@ -3,6 +3,7 @@ from uuid import uuid4
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     DateTime,
     ForeignKey,
@@ -189,3 +190,20 @@ class AgentConnection(Base):
         DateTime(timezone=True), nullable=True
     )
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+    __table_args__ = (
+        UniqueConstraint("actor_id", "message_id", name="uq_notifications_actor_message"),
+        Index("ix_notifications_actor_id_id", "actor_id", "id"),
+        {"sqlite_autoincrement": True},
+    )
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
+    actor_id: Mapped[str] = mapped_column(ForeignKey("actors.id"))
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"))
+    message_id: Mapped[str] = mapped_column(ForeignKey("messages.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
