@@ -1,6 +1,6 @@
 # Claude Code plugin: `workspace`
 
-Connect one Claude conversation to Research Workspace mentions with a short command. It packages the scoped session adapter ([claude-session.md](claude-session.md)); the server API is unchanged. Hooks only deliver notifications: no automatic replies, no model launched, no closed session woken.
+Connect one Claude conversation to Research Workspace mentions with a short command. It packages the scoped session adapter ([claude-session.md](claude-session.md)); the server API is unchanged. Hooks only deliver notifications; the connected agent decides on its own whether to reply. No model is launched and no closed session is woken.
 
 ## Install (once)
 
