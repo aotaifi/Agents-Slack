@@ -121,6 +121,34 @@ TOOLS = [
             ["message_id", "emoji"],
         ),
     },
+    {
+        "name": "mute_thread",
+        "description": (
+            "Stop getting mentions from this conversation. Use when the conversation is "
+            "finished for you. Mentions that arrive while it is muted are not delivered later."
+        ),
+        "inputSchema": schema({"thread_id": {"type": "string"}}, ["thread_id"]),
+    },
+    {
+        "name": "unmute_thread",
+        "description": "Get mentions from a muted conversation again.",
+        "inputSchema": schema({"thread_id": {"type": "string"}}, ["thread_id"]),
+    },
+    {
+        "name": "search",
+        "description": (
+            "Search messages in the connected project. Returns short snippets only; use "
+            "read_thread to read more. Try this before asking a question."
+        ),
+        "inputSchema": schema(
+            {
+                "query": {"type": "string", "minLength": 1, "maxLength": 200},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10},
+                "before": {"type": "integer", "description": "next_before from an earlier search."},
+            },
+            ["query"],
+        ),
+    },
 ]
 
 
@@ -250,6 +278,52 @@ def tool_react(args):
     return {"reacted": emoji, "message_id": message_id}
 
 
+def tool_mute_thread(args):
+    return wsplugin.act("mute", connected_session(), cwd(), thread_id=uuid_arg(args, "thread_id"))
+
+
+def tool_unmute_thread(args):
+    return wsplugin.act(
+        "unmute", connected_session(), cwd(), thread_id=uuid_arg(args, "thread_id")
+    )
+
+
+def tool_search(args):
+    query, limit, before = args.get("query"), args.get("limit", 10), args.get("before")
+    if not isinstance(query, str) or not 1 <= len(query.strip()) <= 200 or len(query) > 200:
+        raise ToolError("query must be 1 to 200 characters.")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+        raise ToolError("limit must be a whole number from 1 to 20.")
+    params = {"q": query.strip(), "limit": limit}
+    if before is not None:
+        if isinstance(before, bool) or not isinstance(before, int) or before < 1:
+            raise ToolError("before must be a positive whole number.")
+        params["before"] = before
+    workspace, _ = wsplugin.load(connected_session())
+    try:
+        raw = workspace.api().request(
+            "GET", f"projects/{workspace.config['project_id']}/search", query=params
+        )
+    except ApiError as exc:
+        if exc.status in (404, 405):
+            raise ToolError("This workspace server does not support search yet.") from None
+        raise
+    items = []
+    for hit in raw.get("items", []):
+        message, thread = hit.get("message") or {}, hit.get("thread") or {}
+        items.append(
+            {
+                "message_id": message.get("id"),
+                "thread_id": message.get("thread_id") or thread.get("id"),
+                "thread_title": thread.get("title"),
+                "author": (message.get("author") or {}).get("handle"),
+                "snippet": hit.get("snippet"),
+                "created_at": message.get("created_at"),
+            }
+        )
+    return {"items": items, "next_before": raw.get("next_before")}
+
+
 HANDLERS = {
     "status": tool_status,
     "check_mentions": tool_check_mentions,
@@ -257,6 +331,9 @@ HANDLERS = {
     "reply": tool_reply,
     "dismiss": tool_dismiss,
     "react": tool_react,
+    "mute_thread": tool_mute_thread,
+    "unmute_thread": tool_unmute_thread,
+    "search": tool_search,
 }
 
 
@@ -304,7 +381,7 @@ def handle(msg):
             {
                 "protocolVersion": asked if asked in VERSIONS else VERSIONS[0],
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "workspace", "version": "0.3.0"},
+                "serverInfo": {"name": "workspace", "version": "0.4.0"},
                 "instructions": instructions(),
             }
         )

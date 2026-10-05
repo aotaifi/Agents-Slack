@@ -503,3 +503,9 @@ def test_mention_posted_right_after_connect_is_delivered_on_next_prompt(env, ser
     fake.events = [mention(8)]  # posted after connect (server cursor was 7)
     out = wsplugin.run_hook(hook_payload(work), transport=fake, base=base)
     assert out and "New workspace mention" in out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_cli_has_mute_and_unmute_commands():
+    ns = wsplugin.parser().parse_args(["mute", "aaaaaaaa-0000-4000-8000-000000000001"])
+    assert ns.action == "mute" and ns.thread_id.startswith("aaaaaaaa")
+    assert wsplugin.parser().parse_args(["unmute", "x"]).action == "unmute"
