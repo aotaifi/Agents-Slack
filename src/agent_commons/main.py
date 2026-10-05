@@ -8,6 +8,7 @@ from datetime import timedelta, timezone
 from email.message import EmailMessage
 from email.utils import format_datetime, make_msgid
 from pathlib import Path
+from typing import Literal
 from uuid import UUID
 
 from fastapi import (
@@ -23,7 +24,17 @@ from fastapi import (
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import and_, func, literal_column, select, text, update
+from sqlalchemy import (
+    and_,
+    case,
+    delete,
+    func,
+    literal_column,
+    or_,
+    select,
+    text,
+    update,
+)
 from sqlalchemy.dialects.postgresql import to_tsvector, websearch_to_tsquery
 from sqlalchemy.orm import Session, object_session
 
@@ -1119,24 +1130,83 @@ def create_app(database_url: str | None = None):
             )
         return {"status": "submitted"}
 
+    def closed_invitation_clause():
+        return or_(
+            Invitation.used_at.is_not(None),
+            Invitation.revoked.is_(True),
+            Invitation.expires_at <= now(),
+        )
+
     @app.get("/v1/projects/{project_id}/invitations")
     def invitations(
         project_id: str,
+        state: Literal["open", "closed", "all"] = "all",
+        limit: int = Query(100, ge=1, le=100),
         a=Depends(authenticated, scope="function"),
         db: Session = Depends(session, scope="function"),
     ):
         project_access(db, a, project_id, owner=True)
+        query = select(Invitation).where(Invitation.project_id == project_id)
+        if state == "open":
+            query = query.where(~closed_invitation_clause())
+        elif state == "closed":
+            query = query.where(closed_invitation_clause())
+        if state == "closed":
+            # Most recent change first. Withdrawal time is not recorded, so a withdrawn
+            # invitation sorts by creation time.
+            changed = case(
+                (Invitation.used_at.is_not(None), Invitation.used_at),
+                (Invitation.revoked.is_(True), Invitation.created_at),
+                else_=Invitation.expires_at,
+            )
+            query = query.order_by(changed.desc(), Invitation.created_at.desc())
+        else:
+            query = query.order_by(Invitation.created_at.desc())
+        rows = list(db.scalars(query.limit(limit)))
+        accepted = {
+            actor.id: actor
+            for actor in db.scalars(
+                select(Actor).where(
+                    Actor.id.in_({i.accepted_actor_id for i in rows if i.accepted_actor_id})
+                )
+            )
+        }
         return {
             "items": [
-                invitation_json(i)
-                for i in db.scalars(
-                    select(Invitation)
-                    .where(Invitation.project_id == project_id)
-                    .order_by(Invitation.created_at.desc())
-                    .limit(100)
-                )
+                {
+                    **invitation_json(i),
+                    "used_at": timestamp(i.used_at) if i.used_at else None,
+                    "accepted_by": (
+                        {
+                            "id": accepted[i.accepted_actor_id].id,
+                            "name": accepted[i.accepted_actor_id].name,
+                            "handle": accepted[i.accepted_actor_id].handle,
+                        }
+                        if i.accepted_actor_id in accepted
+                        else None
+                    ),
+                }
+                for i in rows
             ]
         }
+
+    @app.delete("/v1/projects/{project_id}/invitations")
+    def clear_invitation_history(
+        project_id: str,
+        state: Literal["closed"],
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        # Owner check locks the project row, which also serializes against acceptance.
+        project_access(db, a, project_id, owner=True)
+        result = db.execute(
+            delete(Invitation).where(
+                Invitation.project_id == project_id,
+                Invitation.used_at.is_(None),
+                or_(Invitation.revoked.is_(True), Invitation.expires_at <= now()),
+            )
+        )
+        return {"deleted": result.rowcount}
 
     @app.delete("/v1/projects/{project_id}/invitations/{invitation_id}", status_code=204)
     def revoke_invitation(

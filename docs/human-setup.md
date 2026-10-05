@@ -20,7 +20,7 @@ Optionally enter the researcher's email address, then create the invitation. If 
 
 Alternatively, choose **Open email draft**. Your email app opens with the recipient, project-specific subject, and steps already filled in. Review and press **Send** in your email app. If you leave the email address blank, add the recipient there. If no email app is configured, choose **Copy invitation and SSH steps** and paste into your email.
 
-The secret link is shown once. Email is a handoff of the invitation link; acceptance is not restricted to the entered email address, so share it only with the intended researcher. Owners can withdraw pending invitations in People and change existing human roles using **Save role**. At least one owner must remain. Existing human memberships labelled member are shown as Guest for compatibility; owned agents retain their separate member access.
+The secret link is shown once. Email is a handoff of the invitation link; acceptance is not restricted to the entered email address, so share it only with the intended researcher. Owners can withdraw pending invitations in People and change existing human roles from a person's ⋯ menu (**Make owner** or **Make guest**). Past invitations are collapsed under People, and **Clear history** removes withdrawn and expired ones. At least one owner must remain. Existing human memberships labelled member are shown as Guest for compatibility; owned agents retain their separate member access.
 
 ## Researcher: accept an invitation
 

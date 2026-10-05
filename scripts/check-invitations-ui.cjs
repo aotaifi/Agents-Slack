@@ -22,7 +22,8 @@ function setup(url = 'http://127.0.0.1:8000/', token = '', emailEnabled = true) 
   w.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
   w.HTMLDialogElement.prototype.close = function () { this.open = false; };
   w.setInterval = () => 1; w.clearInterval = () => {};
-  let signedIn = token ? owner : null; const requests = []; let members = [{ actor: owner, role: 'owner' }];
+  let signedIn = token ? owner : null; const requests = []; let members = [{ actor: owner, role: 'owner' }]; let invitationRows = [];
+  const isClosed = row => row.used || row.revoked || Date.parse(row.expires_at) <= Date.now();
   if (token) w.sessionStorage.setItem('commons_token', token);
   w.fetch = async (url, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : undefined;
@@ -39,12 +40,14 @@ function setup(url = 'http://127.0.0.1:8000/', token = '', emailEnabled = true) 
     else if (url === '/v1/actors') data = { items: [owner, guest] };
     else if (url.endsWith('/role')) { members.find(m => url.includes(`/members/${m.actor.id}/`)).role = body.role; data = {}; }
     else if (url.endsWith('/members')) data = { items: members };
+    else if (/\/invitations\?state=/.test(url) && options.method === 'DELETE') { const before = invitationRows.length; invitationRows = invitationRows.filter(row => row.used || !isClosed(row)); data = { deleted: before - invitationRows.length }; }
+    else if (/\/invitations\?state=/.test(url)) { const query = new URL(url, 'http://x').searchParams; data = { items: invitationRows.filter(row => (query.get('state') === 'open') !== isClosed(row)).slice(0, Number(query.get('limit') || 100)) }; }
     else if (url.endsWith('/invitations')) data = options.method === 'POST' ? invitation : { items: [invitation] };
     else data = { items: [], cursor: 0, next_cursor: null };
     return { status: 200, ok: true, json: async () => structuredClone(data) };
   };
   w.eval(source.replace('  const savedToken = state.token;', '  window.__invitationTest = { state, showMembers, createInvitation, openInvitation };\n  const savedToken = state.token;'));
-  return { dom, w, requests, setMembers: values => { members = values; } };
+  return { dom, w, requests, setMembers: values => { members = values; }, setInvitations: rows => { invitationRows = rows; } };
 }
 (async () => {
   const admin = setup(); await flush(); const { w, requests } = admin; const api = w.__invitationTest;
@@ -91,12 +94,51 @@ function setup(url = 'http://127.0.0.1:8000/', token = '', emailEnabled = true) 
   assert.equal(mailForm.querySelector('button').disabled, true);
   assert.ok(!requests.some(r => r.url.includes(code)), 'secret never placed in API URL');
   await api.showMembers();
-  const picker = w.document.querySelector('[aria-label="Role for Owner"]'); picker.value = 'guest';
-  [...w.document.querySelectorAll('button')].find(b => b.textContent === 'Save role').click(); await flush();
+  const row = (id, role, extra = {}) => ({ id, role, used: false, revoked: false, created_at: '2026-01-01T00:00:00Z', expires_at: '2099-01-01T00:00:00Z', ...extra });
+  const closedRows = [row('acc', 'guest', { used: true, used_at: '2026-03-01T10:00:00Z', accepted_by: { id: 'guest', name: 'Alex', handle: 'alex' } }), row('exp', 'owner', { expires_at: '2026-02-01T00:00:00Z' }),
+    ...Array.from({ length: 10 }, (_, i) => row(`wd${i}`, 'guest', { revoked: true }))];
+  admin.setInvitations([row('open1', 'guest'), row('open2', 'owner'), ...closedRows]);
+  requests.length = 0; await api.showMembers();
+  const doc = w.document; const modal = doc.querySelector('#modal-content');
+  assert.deepEqual(requests.filter(r => r.url.includes('/invitations')).map(r => `${r.method} ${r.url}`).sort(), ['GET /v1/projects/project/invitations?state=closed&limit=100', 'GET /v1/projects/project/invitations?state=open']);
+  assert.deepEqual([...modal.querySelectorAll('h3')].map(h => h.textContent.replace(/\s+/g, ' ').trim()), ['People (1)', 'Agents (0)', 'Invitations'], 'three sections in order');
+  assert.equal(modal.querySelector('h4').textContent, 'Pending (2)');
+  const pendingRows = [...modal.querySelectorAll('.invitation-pending .invitation-row')];
+  assert.equal(pendingRows.length, 2, 'only open invitations are listed as pending');
+  assert.ok(pendingRows.every(r => r.querySelector('button').textContent === 'Withdraw' && /Expires/.test(r.textContent) && !/Accepted|Withdrawn|Expired /.test(r.textContent)));
+  const history = modal.querySelector('details.invitation-history'); assert.ok(history); assert.equal(history.open, false, 'history is collapsed');
+  assert.equal(history.querySelector('summary').textContent, 'Past invitations (12)');
+  const past = [...history.querySelectorAll('.invitation-row')]; assert.equal(past.length, 10, 'at most 10 closed invitations');
+  assert.match(past[0].textContent, /^Guest · Accepted by @alex · /); assert.match(past[1].textContent, /^Owner · Expired · /);
+  assert.equal(past[2].textContent, 'Guest · Withdrawn', 'withdrawn has no date'); assert.ok(past.every(r => !r.querySelector('button')));
+  assert.match(history.textContent, /Showing the 10 most recent of 12/);
+  const clearButton = [...history.querySelectorAll('button')].find(b => b.textContent === 'Clear history'); assert.ok(clearButton);
+  let confirmed = false; w.confirm = () => confirmed; requests.length = 0;
+  clearButton.click(); await flush(); assert.ok(!requests.some(r => r.method === 'DELETE'), 'declined confirm deletes nothing');
+  confirmed = true; clearButton.click(); await flush();
+  const cleared = requests.find(r => r.method === 'DELETE'); assert.equal(cleared.url, '/v1/projects/project/invitations?state=closed');
+  assert.ok(requests.findIndex(r => r.url.endsWith('state=open')) > requests.indexOf(cleared), 'panel refreshes after clearing');
+  assert.equal(doc.querySelector('details.invitation-history summary').textContent, 'Past invitations (1)');
+  assert.equal(doc.querySelectorAll('details.invitation-history .invitation-row').length, 1); assert.match(doc.querySelector('details.invitation-history').textContent, /Accepted by @alex/);
+  assert.ok(![...doc.querySelectorAll('button')].some(b => b.textContent === 'Clear history'), 'nothing left to clear');
+  requests.length = 0; [...doc.querySelectorAll('.invitation-pending button')][0].click(); await flush();
+  assert.deepEqual(requests.filter(r => r.method === 'DELETE').map(r => r.url), ['/v1/projects/project/invitations/open1']);
+  const ownerRow = doc.querySelector('.member-row'); assert.match(ownerRow.textContent, /Owner/); assert.match(ownerRow.textContent, /@owner/); assert.match(ownerRow.textContent, /You/);
+  const more = ownerRow.querySelector('[aria-label="Actions for Owner"]'); const menu = ownerRow.querySelector('.member-actions');
+  assert.equal(menu.hidden, true, 'row actions stay hidden until opened'); assert.equal(doc.querySelectorAll('.member-row select').length, 0);
+  more.click(); assert.equal(menu.hidden, false); assert.equal(more.getAttribute('aria-expanded'), 'true');
+  [...menu.querySelectorAll('button')].find(b => b.textContent === 'Make guest').click(); await flush();
   assert.deepEqual(requests.find(r => r.url.endsWith('/role')).body, { role: 'guest' });
-  api.state.me = guest; admin.setMembers([{ actor: guest, role: 'guest' }]); await api.showMembers();
-  assert.ok(![...w.document.querySelectorAll('button')].some(b => b.textContent === 'Invite researcher'));
-  assert.equal(w.document.querySelectorAll('[aria-label^="Role for"]').length, 0);
+  const bot = { id: 'bot', name: 'Bot', handle: 'owner.bot', kind: 'agent', owner: owner, owner_id: owner.id };
+  admin.setMembers([{ actor: owner, role: 'owner' }, { actor: bot, role: 'member', muted: true }]); await api.showMembers();
+  const botRow = doc.querySelector('.agent-block .member-row'); assert.equal(botRow.querySelector('.chip').textContent, 'Muted'); assert.match(botRow.querySelector('.member-sub').textContent, /owned by Owner/);
+  botRow.querySelector('.more-button').click(); requests.length = 0; [...botRow.querySelectorAll('.member-actions button')].find(b => b.textContent === 'Unmute').click(); await flush();
+  assert.deepEqual(requests.find(r => r.method === 'PATCH').body, { muted: false }); admin.setMembers([{ actor: owner, role: 'owner' }]);
+  const outgoing = requests.length; api.state.me = guest; admin.setMembers([{ actor: guest, role: 'guest' }]); await api.showMembers();
+  assert.ok(![...doc.querySelectorAll('button')].some(b => b.textContent === 'Invite researcher'));
+  assert.ok(![...doc.querySelectorAll('h3')].some(h => /Invitations/.test(h.textContent)) && !doc.querySelector('details.invitation-history'), 'guests have no invitations section');
+  assert.ok(!requests.slice(outgoing).some(r => r.url.includes('/invitations')), 'guests never request invitations');
+  assert.equal(doc.querySelectorAll('[aria-label^="Role for"], .more-button').length, 0);
   admin.dom.window.close();
 
   const disabledMail = setup('https://workspace.example.test/', '', false);
