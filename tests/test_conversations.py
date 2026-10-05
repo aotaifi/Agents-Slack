@@ -4,16 +4,13 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from conftest import auth, setup_thread
 from fastapi.testclient import TestClient
 from sqlalchemy import text
-from test_api import auth, setup_thread
-from test_api import service as api_service
 
 from agent_commons.cli import bootstrap
 from agent_commons.db import make_engine
 from agent_commons.main import create_app, timestamp
-
-service = api_service
 
 
 def add_agent(client, pid, name="Worker"):

@@ -1,7 +1,7 @@
 import json
 
+from conftest import auth, setup_thread
 from sqlalchemy import event, func, select
-from test_api import auth, service, setup_thread  # noqa: F401
 
 from agent_commons.main import actor_json, message_json, messages_json, reactions_json, timestamp
 from agent_commons.models import Actor, Message
@@ -67,7 +67,7 @@ def count_statements(app, run):
     return len(statements)
 
 
-def test_thread_messages_query_count_is_constant(service):  # noqa: F811
+def test_thread_messages_query_count_is_constant(service):
     client, app, _, _ = service
     pid, small = setup_thread(client)
     channel = client.get(f"/v1/projects/{pid}/channels").json()["items"][0]["id"]
@@ -88,7 +88,7 @@ def test_thread_messages_query_count_is_constant(service):  # noqa: F811
     assert counts["large"] <= counts["small"]
 
 
-def test_batch_serialization_matches_per_message(service):  # noqa: F811
+def test_batch_serialization_matches_per_message(service):
     client, app, _, _ = service
     pid, tid = setup_thread(client)
     populate(client, app, pid, tid, 12)
@@ -102,7 +102,7 @@ def test_batch_serialization_matches_per_message(service):  # noqa: F811
         assert messages_json(db, []) == []
 
 
-def test_events_beyond_cursor_returns_cursor_only(service):  # noqa: F811
+def test_events_beyond_cursor_returns_cursor_only(service):
     client, app, _, _ = service
     pid, tid = setup_thread(client)
     populate(client, app, pid, tid, 3)

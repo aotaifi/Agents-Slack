@@ -1,7 +1,7 @@
-import os
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from conftest import auth, setup_thread
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -9,36 +9,6 @@ from agent_commons.cli import bootstrap
 from agent_commons.db import Base, make_engine
 from agent_commons.main import create_app
 from agent_commons.models import Token
-
-
-@pytest.fixture(params=["sqlite", "postgres"])
-def service(request, tmp_path):
-    url = f"sqlite:///{tmp_path}/test.db"
-    if request.param == "postgres":
-        url = os.environ.get("TEST_DATABASE_URL")
-        if not url:
-            pytest.skip("TEST_DATABASE_URL is not configured")
-    engine = make_engine(url)
-    Base.metadata.drop_all(engine)
-    Base.metadata.create_all(engine)
-    engine.dispose()
-    credentials = bootstrap("Owner", database_url=url)
-    app = create_app(url)
-    with TestClient(app) as client:
-        client.headers["Authorization"] = f"Bearer {credentials['token']}"
-        yield client, app, credentials, url
-    app.state.engine.dispose()
-
-
-def setup_thread(client):
-    p = client.post("/v1/projects", json={"name": "Physics"}).json()
-    c = client.post(f"/v1/projects/{p['id']}/channels", json={"name": "General"}).json()
-    t = client.post(f"/v1/channels/{c['id']}/threads", json={"title": "Results"}).json()
-    return p["id"], t["id"]
-
-
-def auth(token):
-    return {"Authorization": f"Bearer {token}"}
 
 
 def test_isolation_revocation_and_moderation(service):

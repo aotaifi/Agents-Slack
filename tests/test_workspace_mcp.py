@@ -5,12 +5,11 @@ import os
 import re
 import subprocess
 import sys
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from stubs import JsonHandler
 
 PLUGIN = Path(__file__).resolve().parents[1] / "plugins" / "workspace"
 SERVER = PLUGIN / "scripts" / "mcp_server.py"
@@ -26,19 +25,12 @@ OTHER = "dddddddd-0000-4000-8000-000000000004"
 LONG = "word " * 200  # 1000 characters
 
 
-class Stub(BaseHTTPRequestHandler):
+class Stub(JsonHandler):
     log = []
     foreign_thread = False
     inbox_thread = THREAD
     event_id = 8
     search_status = 200
-
-    def _send(self, body, code=200):
-        raw = json.dumps(body).encode()
-        self.send_response(code)
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
 
     def do_GET(self):
         Stub.log.append(("GET", self.path, dict(self.headers)))
@@ -46,9 +38,9 @@ class Stub(BaseHTTPRequestHandler):
         query = parse_qs(url.query)
         if url.path.endswith("/inbox"):
             if query["after"] == ["0"]:
-                return self._send({"items": [], "next_cursor": None, "cursor": 7})
+                return self.send_json({"items": [], "next_cursor": None, "cursor": 7})
             if int(query["after"][0]) >= Stub.event_id:
-                return self._send({"items": [], "next_cursor": None, "cursor": Stub.event_id})
+                return self.send_json({"items": [], "next_cursor": None, "cursor": Stub.event_id})
             item = {
                 "id": Stub.event_id,
                 "type": "message.created",
@@ -58,12 +50,12 @@ class Stub(BaseHTTPRequestHandler):
                     "mentions": ["agent"], "text": "ignored",
                 },
             }  # fmt: skip
-            return self._send(
+            return self.send_json(
                 {"items": [item], "next_cursor": None, "cursor": Stub.event_id}
             )
         if url.path.endswith("/search"):
             if Stub.search_status != 200:
-                return self._send({"detail": "nope"}, Stub.search_status)
+                return self.send_json({"detail": "nope"}, Stub.search_status)
             hit = {
                 "message": {
                     "id": TRIGGER, "thread_id": THREAD, "author": {"id": "human", "handle": "ana"},
@@ -73,7 +65,7 @@ class Stub(BaseHTTPRequestHandler):
                 "thread": {"id": THREAD, "title": "Question", "channel_id": "chan"},
                 "snippet": "found <b>it</b>",
             }  # fmt: skip
-            return self._send({"items": [hit], "next_before": 3, "cursor": 9})
+            return self.send_json({"items": [hit], "next_before": 3, "cursor": 9})
         if url.path.endswith("/context"):
             project = "elsewhere" if Stub.foreign_thread else "project"
             trigger = query.get("trigger_message_id", [TRIGGER])[0]
@@ -81,7 +73,7 @@ class Stub(BaseHTTPRequestHandler):
             cap = int(query["max_chars"][0])  # like the real server, clip to the budget
             cap = 300 if cap <= 2000 else cap  # small share for the adapter-sized request
             full = "Please review " + "x" * 7000
-            return self._send(
+            return self.send_json(
                 {
                     "thread": {"id": THREAD, "project_id": project, "title": "Question"},
                     "rules": {"text": "Be brief.", "version": 1},
@@ -97,36 +89,29 @@ class Stub(BaseHTTPRequestHandler):
                 }
             )
         if url.path == "/v1/me":
-            return self._send({**CONNECTION["actor"], "connection": CONNECTION})
-        self._send({}, 404)
+            return self.send_json({**CONNECTION["actor"], "connection": CONNECTION})
+        self.send_json({}, 404)
 
     def _write(self, method):
-        n = int(self.headers.get("Content-Length") or 0)
-        body = json.loads(self.rfile.read(n) or b"{}")
+        body = self.read_json()
         Stub.log.append((method, self.path, body, dict(self.headers)))
         if self.path.endswith("/claim"):
-            return self._send({"connection": {**CONNECTION, "bound": True, "active": True}})
+            return self.send_json({"connection": {**CONNECTION, "bound": True, "active": True}})
         if self.path.endswith("/messages"):
-            return self._send({"id": "posted"}, 201)
+            return self.send_json({"id": "posted"}, 201)
         if self.path.endswith("/reactions"):
-            return self._send({"id": OTHER, "project_id": "project"})
-        self._send({}, 404)
+            return self.send_json({"id": OTHER, "project_id": "project"})
+        self.send_json({}, 404)
 
     do_POST = lambda self: self._write("POST")  # noqa: E731
     do_PUT = lambda self: self._write("PUT")  # noqa: E731
 
-    def log_message(self, *a):
-        pass
-
 
 @pytest.fixture
-def stub():
+def stub(stub_server):
     Stub.log, Stub.foreign_thread = [], False
     Stub.inbox_thread, Stub.event_id, Stub.search_status = THREAD, 8, 200
-    httpd = HTTPServer(("127.0.0.1", 0), Stub)
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{httpd.server_port}"
-    httpd.shutdown()
+    return stub_server(Stub)
 
 
 @pytest.fixture

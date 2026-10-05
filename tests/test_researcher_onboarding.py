@@ -3,14 +3,12 @@ import json
 from pathlib import Path
 
 import pytest
-from test_api import auth
-from test_api import service as api_service
+from conftest import auth
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "register-researcher.py"
 spec = importlib.util.spec_from_file_location("register_researcher", SCRIPT)
 onboarding = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(onboarding)
-service = api_service
 
 
 def write_credentials(path, token, **extra):

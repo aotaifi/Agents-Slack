@@ -20,17 +20,30 @@ def issue_token(session, actor, token=None, connection_id=None):
 
 _SCRYPT_WORK = threading.BoundedSemaphore(2)
 
+# Production cost parameters. They are plain module constants, never read from the
+# environment; only the test suite replaces them (tests/conftest.py).
+SCRYPT_N = 32768
+SCRYPT_R = 8
+SCRYPT_P = 3
+
 
 def _derive(password, salt):
     with _SCRYPT_WORK:
         return hashlib.scrypt(
-            password.encode(), salt=salt, n=32768, r=8, p=3, maxmem=64 * 1024 * 1024, dklen=64
+            password.encode(),
+            salt=salt,
+            n=SCRYPT_N,
+            r=SCRYPT_R,
+            p=SCRYPT_P,
+            maxmem=64 * 1024 * 1024,
+            dklen=64,
         )
 
 
 def hash_password(password):
     salt = secrets.token_bytes(16)
-    return f"scrypt$32768$8$3${salt.hex()}${_derive(password, salt).hex()}"
+    params = f"{SCRYPT_N}${SCRYPT_R}${SCRYPT_P}"
+    return f"scrypt${params}${salt.hex()}${_derive(password, salt).hex()}"
 
 
 _DUMMY_HASH = hash_password("dummy password for unknown identity")
@@ -40,7 +53,7 @@ def verify_password(password, encoded):
     target = encoded or _DUMMY_HASH
     try:
         scheme, n, r, p, salt, expected = target.split("$")
-        if (scheme, n, r, p) != ("scrypt", "32768", "8", "3"):
+        if (scheme, n, r, p) != ("scrypt", str(SCRYPT_N), str(SCRYPT_R), str(SCRYPT_P)):
             return False
         result = _derive(password, bytes.fromhex(salt))
         valid = hmac.compare_digest(result, bytes.fromhex(expected))

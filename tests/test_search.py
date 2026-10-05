@@ -1,5 +1,5 @@
 import pytest
-from test_api import auth, service, setup_thread  # noqa: F401
+from conftest import auth, setup_thread
 
 
 def post(client, tid, text, **headers):
@@ -16,7 +16,7 @@ def texts(response):
     return [i["message"]["text"] for i in response.json()["items"]]
 
 
-def test_finds_by_word_and_shape_matches_thread_messages(service):  # noqa: F811
+def test_finds_by_word_and_shape_matches_thread_messages(service):
     client, *_ = service
     pid, tid = setup_thread(client)
     post(client, tid, "The gradient flow converges slowly")
@@ -38,7 +38,7 @@ def test_finds_by_word_and_shape_matches_thread_messages(service):  # noqa: F811
     assert body["next_before"] is None and body["cursor"] == listed[-1]["sequence"]
 
 
-def test_multiple_words_must_all_match(service):  # noqa: F811
+def test_multiple_words_must_all_match(service):
     client, *_ = service
     pid, tid = setup_thread(client)
     post(client, tid, "alpha beta gamma")
@@ -48,7 +48,7 @@ def test_multiple_words_must_all_match(service):  # noqa: F811
     assert texts(search(client, pid, "alpha delta")) == []
 
 
-def test_newest_first_and_paging(service):  # noqa: F811
+def test_newest_first_and_paging(service):
     client, *_ = service
     pid, tid = setup_thread(client)
     for n in range(5):
@@ -66,7 +66,7 @@ def test_newest_first_and_paging(service):  # noqa: F811
     assert len(exact["items"]) == 5 and exact["next_before"] is None
 
 
-def test_validation(service):  # noqa: F811
+def test_validation(service):
     client, *_ = service
     pid, _ = setup_thread(client)
     assert search(client, pid, "   ").status_code == 422
@@ -80,7 +80,7 @@ def test_validation(service):  # noqa: F811
     assert search(client, pid, "x", limit=50, before=1).status_code == 200
 
 
-def test_non_member_scoped_connection_and_other_projects(service):  # noqa: F811
+def test_non_member_scoped_connection_and_other_projects(service):
     client, *_ = service
     pid, tid = setup_thread(client)
     post(client, tid, "secret finding")
@@ -124,7 +124,7 @@ def test_non_member_scoped_connection_and_other_projects(service):  # noqa: F811
     assert scoped(other).status_code == 404
 
 
-def test_messages_after_snapshot_are_not_returned(service):  # noqa: F811
+def test_messages_after_snapshot_are_not_returned(service):
     client, app, *_ = service
     pid, tid = setup_thread(client)
     post(client, tid, "visible marker")
@@ -138,7 +138,7 @@ def test_messages_after_snapshot_are_not_returned(service):  # noqa: F811
     assert search(client, pid, "marker").json()["cursor"] == late["sequence"] - 1
 
 
-def test_wildcards_are_literal(service):  # noqa: F811
+def test_wildcards_are_literal(service):
     client, *_ = service
     pid, tid = setup_thread(client)
     post(client, tid, "100% sure")
@@ -152,7 +152,7 @@ def test_wildcards_are_literal(service):  # noqa: F811
         assert set(found) <= {"100% sure", "a_b match"}, (wildcard, found)
 
 
-def test_unicode_german_text(service):  # noqa: F811
+def test_unicode_german_text(service):
     client, *_ = service
     pid, tid = setup_thread(client)
     post(client, tid, "Der Übergang zwischen den Phasen ist stetig")
@@ -162,7 +162,7 @@ def test_unicode_german_text(service):  # noqa: F811
     assert texts(search(client, pid, "größe")) == ["Straße und Größe"]
 
 
-def test_snippet_is_plain_text_around_match(service):  # noqa: F811
+def test_snippet_is_plain_text_around_match(service):
     client, *_ = service
     pid, tid = setup_thread(client)
     body = "<b>" + "lorem ipsum " * 60 + "needle " + "dolor sit " * 60
@@ -176,7 +176,7 @@ def test_snippet_is_plain_text_around_match(service):  # noqa: F811
 
 
 @pytest.mark.parametrize("q", ["needle", "NEEDLE"])
-def test_text_is_stored_unchanged(service, q):  # noqa: F811
+def test_text_is_stored_unchanged(service, q):
     client, *_ = service
     pid, tid = setup_thread(client)
     raw = "```py\nprint('needle')\n``` and $x^2$ <script>"

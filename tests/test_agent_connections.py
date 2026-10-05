@@ -1,14 +1,11 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
+from conftest import auth, setup_thread
 from sqlalchemy import select
-from test_api import auth, setup_thread
-from test_api import service as api_service
 
 from agent_commons.models import AgentConnection, Membership, Token, now
 from agent_commons.security import digest
-
-service = api_service
 
 
 def setup_agent(client, project_ids, name="Worker"):

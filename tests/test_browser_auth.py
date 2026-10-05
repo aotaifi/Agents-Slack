@@ -3,16 +3,14 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Event as Signal
 
+from conftest import auth, setup_thread
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
-from test_api import auth, setup_thread
-from test_api import service as api_service
 
 from agent_commons.main import create_app, utc
 from agent_commons.models import Actor, AuthAttempt, BrowserSession, Token, now
 from agent_commons.security import digest, verify_password
 
-service = api_service
 PASSWORD = "a sufficiently long password"
 NEW_PASSWORD = "  another sufficiently long password  "
 ORIGIN = {"Origin": "http://testserver"}
@@ -51,7 +49,7 @@ def test_login_session_cookie_attributes_and_restart(service):
     with app.state.session_factory() as db:
         actor = db.get(Actor, owner["actor"]["id"])
         assert PASSWORD not in actor.password_hash and actor.password_hash.startswith(
-            "scrypt$32768$8$3$"
+            "scrypt$"
         )
         saved = db.get(BrowserSession, digest(raw))
         assert saved.digest != raw

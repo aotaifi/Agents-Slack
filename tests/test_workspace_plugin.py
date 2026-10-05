@@ -5,11 +5,10 @@ import json
 import os
 import socket
 import sys
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
+from stubs import JsonHandler
 
 PLUGIN = Path(__file__).resolve().parents[1] / "plugins" / "workspace"
 sys.path.insert(0, str(PLUGIN / "lib"))
@@ -30,46 +29,33 @@ CONNECTION = {
 }
 
 
-class Stub(BaseHTTPRequestHandler):
+class Stub(JsonHandler):
     log = []
     kind = "agent"
-
-    def _send(self, body, code=200):
-        raw = json.dumps(body).encode()
-        self.send_response(code)
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
 
     def do_GET(self):
         Stub.log.append(("GET", self.path))
         if "/inbox" in self.path:
-            return self._send({"items": [], "next_cursor": None, "cursor": 7})
+            return self.send_json({"items": [], "next_cursor": None, "cursor": 7})
         if self.path == "/v1/me":
-            return self._send({**CONNECTION["actor"], "kind": Stub.kind, "connection": CONNECTION})
-        self._send({}, 404)
+            me = {**CONNECTION["actor"], "kind": Stub.kind, "connection": CONNECTION}
+            return self.send_json(me)
+        self.send_json({}, 404)
 
     def do_POST(self):
-        n = int(self.headers.get("Content-Length") or 0)
-        body = json.loads(self.rfile.read(n) or b"{}")
+        body = self.read_json()
         Stub.log.append(("POST", self.path, body))
         if self.path.endswith("/claim"):
-            return self._send({"connection": {**CONNECTION, "bound": True, "active": True}})
+            return self.send_json({"connection": {**CONNECTION, "bound": True, "active": True}})
         if self.path.endswith("/release"):
-            return self._send({"connection": {**CONNECTION, "bound": True, "active": False}})
-        self._send({}, 404)
-
-    def log_message(self, *a):
-        pass
+            return self.send_json({"connection": {**CONNECTION, "bound": True, "active": False}})
+        self.send_json({}, 404)
 
 
 @pytest.fixture
-def server():
+def server(stub_server):
     Stub.log, Stub.kind = [], "agent"
-    httpd = HTTPServer(("127.0.0.1", 0), Stub)
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{httpd.server_port}"
-    httpd.shutdown()
+    return stub_server(Stub)
 
 
 @pytest.fixture
@@ -203,7 +189,7 @@ def test_human_or_admin_credentials_and_bad_files_are_rejected_and_clean_up(env,
 
 def test_failed_claim_leaves_nothing_behind(env, server, monkeypatch):
     base, work, cred = env
-    monkeypatch.setattr(Stub, "do_POST", lambda self: self._send({}, 409))
+    monkeypatch.setattr(Stub, "do_POST", lambda self: self.send_json({}, 409))
     with pytest.raises(Exception):
         wsplugin.connect(args(credentials=str(cred), url=server), SID, str(work), base=base)
     assert not wsplugin.session_dir(SID, base).exists()
