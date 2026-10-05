@@ -58,3 +58,17 @@ def test_message_size_boundary(service):
     rejected = post(client, tid, big + "x")
     assert rejected.status_code == 422
     assert len(client.get(f"/v1/threads/{tid}/messages").json()["items"]) == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"text": "before\x00after"},
+        {"text": "ok", "metadata": {"note": "a\x00b"}},
+    ],
+)
+def test_nul_character_is_rejected_on_every_backend(service, body):
+    client, *_ = service
+    pid, tid = setup_thread(client)
+    assert client.post(f"/v1/threads/{tid}/messages", json=body).status_code == 422
+    assert client.get(f"/v1/threads/{tid}/messages").json()["items"] == []
