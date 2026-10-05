@@ -116,21 +116,70 @@ def member_json(db, m):
     return {"actor": actor_json(db.get(Actor, m.actor_id)), "role": m.role, "muted": m.muted}
 
 
+def messages_json(db, messages):
+    """Serialize messages with a constant number of queries."""
+    messages = list(messages)
+    if not messages:
+        return []
+    ids = [m.id for m in messages]
+    actors = {}
+    author_ids = {m.author_id for m in messages}
+    if author_ids:
+        actors.update({a.id: a for a in db.scalars(select(Actor).where(Actor.id.in_(author_ids)))})
+    owner_ids = {a.owner_id for a in actors.values() if a.owner_id} - actors.keys()
+    if owner_ids:
+        actors.update({a.id: a for a in db.scalars(select(Actor).where(Actor.id.in_(owner_ids)))})
+    groups = {}
+    for reaction, actor in db.execute(
+        select(Reaction, Actor)
+        .join(Actor, Actor.id == Reaction.actor_id)
+        .where(Reaction.message_id.in_(ids))
+        .order_by(Reaction.emoji, Actor.handle, Actor.id)
+    ):
+        groups.setdefault(reaction.message_id, {}).setdefault(reaction.emoji, []).append(
+            reaction_actor(actor)
+        )
+    reply_counts = dict(
+        db.execute(
+            select(Message.reply_to, func.count())
+            .where(Message.reply_to.in_(ids))
+            .group_by(Message.reply_to)
+        ).all()
+    )
+    result = []
+    for m in messages:
+        author = actors[m.author_id]
+        owner = actors.get(author.owner_id) if author.owner_id else None
+        result.append(
+            {
+                **{
+                    k: getattr(m, k)
+                    for k in ("id", "thread_id", "project_id", "text", "mentions", "sequence")
+                },
+                "author": {
+                    **{
+                        k: getattr(author, k)
+                        for k in ("id", "name", "handle", "kind", "owner_id", "is_admin")
+                    },
+                    "owner": {k: getattr(owner, k) for k in ("id", "name", "handle")}
+                    if owner
+                    else None,
+                },
+                "metadata": m.data,
+                "reply_to": m.reply_to,
+                "reactions": [
+                    {"emoji": emoji, "actors": people, "count": len(people)}
+                    for emoji, people in groups.get(m.id, {}).items()
+                ],
+                "reply_count": reply_counts.get(m.id, 0),
+                "created_at": timestamp(m.created_at),
+            }
+        )
+    return result
+
+
 def message_json(db, m):
-    return {
-        **{
-            k: getattr(m, k)
-            for k in ("id", "thread_id", "project_id", "text", "mentions", "sequence")
-        },
-        "author": actor_json(db.get(Actor, m.author_id)),
-        "metadata": m.data,
-        "reply_to": m.reply_to,
-        "reactions": reactions_json(db, m.id),
-        "reply_count": db.scalar(
-            select(func.count()).select_from(Message).where(Message.reply_to == m.id)
-        ),
-        "created_at": timestamp(m.created_at),
-    }
+    return messages_json(db, [m])[0]
 
 
 def event_json(e):
@@ -1445,14 +1494,19 @@ def create_app(database_url: str | None = None):
             return value
 
         rules = clipped({"text": p.rules, "version": p.rules_version}, max_chars // 4)
-        trigger_data = clipped(message_json(db, trigger), max_chars // 4) if trigger else None
-        parent_data = clipped(message_json(db, parent), max_chars // 4) if parent else None
+        selected = rows[:limit]
+        wanted = [*selected, *filter(None, [trigger, parent])]
+        serialized = messages_json(db, wanted)
+        serialized_by_id = {v["id"]: v for v in serialized}
+        trigger_data = (
+            clipped(dict(serialized_by_id[trigger.id]), max_chars // 4) if trigger else None
+        )
+        parent_data = clipped(dict(serialized_by_id[parent.id]), max_chars // 4) if parent else None
         # Distribute remaining text over recent messages, giving newer messages first claim.
         recent = []
-        selected = rows[:limit]
         for index, message in enumerate(selected):
             allowance = remaining // (len(selected) - index)
-            recent.append(clipped(message_json(db, message), allowance))
+            recent.append(clipped(dict(serialized_by_id[message.id]), allowance))
         recent.reverse()
         return {
             "thread": thread_json(t),
@@ -1531,7 +1585,7 @@ def create_app(database_url: str | None = None):
             )
         )
         return {
-            "items": [message_json(db, m) for m in rows[:limit]],
+            "items": messages_json(db, rows[:limit]),
             "next_cursor": rows[limit - 1].sequence if len(rows) > limit else None,
             "cursor": snapshot,
         }

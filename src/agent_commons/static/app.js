@@ -1,7 +1,7 @@
 (() => {
   'use strict';
   const API = '/v1';
-  const REACTIONS = ['👍', '✅', '👀', '❓', '❤️', '🎉'];
+  const REACTIONS = ['👍', '❓'];
   const expandedReplies = new Set();
   const expandedMessages = new Set();
   const $ = (s) => document.querySelector(s);
@@ -190,7 +190,7 @@
     $('#new-channel').disabled = false; $('#members-open').disabled = false; $('#rules-open').disabled = false;
     ui.channelCrumb.textContent = 'Choose a channel'; ui.channelTitle.textContent = 'Project overview'; ui.channelDescription.textContent = project.description || 'Choose a channel to view its conversations.'; ui.projectDescription.textContent = project.name.toUpperCase();
     clearSelection();
-    const generation = state.projectGeneration; try { await Promise.all([loadChannels(), loadMembers(), loadActors()]); if (generation !== state.projectGeneration || state.project?.id !== project.id) return; let after = 0; let snapshot = 0; let page; do { page = await api(`/projects/${encodeURIComponent(project.id)}/events?after=${after}&limit=100`); if (generation !== state.projectGeneration || state.project?.id !== project.id) return; snapshot = page.cursor ?? snapshot; const next = page.next_cursor; if (next === after) break; after = next; } while (after !== null && after !== undefined); state.eventCursor = snapshot; startPolling(); }
+    const generation = state.projectGeneration; try { await Promise.all([loadChannels(), loadMembers(), loadActors()]); if (generation !== state.projectGeneration || state.project?.id !== project.id) return; const page = await api(`/projects/${encodeURIComponent(project.id)}/events?after=2147483647&limit=1`); if (generation !== state.projectGeneration || state.project?.id !== project.id) return; state.eventCursor = page.cursor ?? 0; startPolling(); }
     catch (e) { if (e.message !== 'Authentication required') showError(e.message); }
   }
   function renderProjectHeader() { ui.projectCrumb.textContent = state.project?.name || 'Your workspace'; if (state.project) ui.projectDescription.textContent = state.project.name.toUpperCase(); }
@@ -297,7 +297,7 @@
     const main = document.createElement('div'); main.className = 'message-main';
     const meta = document.createElement('div'); meta.className = 'message-meta';
     const author = document.createElement('span'); author.className = 'message-author'; author.textContent = actorLabel(m.author); meta.append(author);
-    const badge = document.createElement('span'); badge.className = `badge${m.author?.kind === 'agent' ? ' agent' : ''}`; badge.textContent = actorDetail(m.author); meta.append(badge);
+    const badge = document.createElement('span'); badge.className = `badge${m.author?.kind === 'agent' ? ' agent' : ''}`; badge.textContent = m.author?.kind === 'agent' ? 'Agent' : 'Human'; if (m.author?.owner) { const full = actorDetail(m.author); badge.title = full; const hidden = document.createElement('span'); hidden.className = 'visually-hidden'; hidden.textContent = ` (${full})`; badge.append(hidden); } meta.append(badge);
     const time = document.createElement('time'); time.className = 'message-time'; time.textContent = formatDate(m.created_at); time.dateTime = m.created_at || ''; meta.append(time); main.append(meta);
     const text = String(m.text ?? ''); const content = document.createElement('div'); content.className = 'message-text';
     const expanded = expandedMessages.has(m.id); content.textContent = text.length > 800 && !expanded ? `${text.slice(0, 800)}…` : text; main.append(content);
@@ -320,6 +320,10 @@
           state.messages = state.messages.map(message => message.id === fresh.id ? fresh : message); renderMessages();
         } catch (error) { showError(error.message); button.disabled = false; }
       }); reactions.append(button);
+    }
+    for (const reaction of m.reactions || []) {
+      if (REACTIONS.includes(reaction.emoji) || !reaction.count) continue;
+      const shown = document.createElement('span'); shown.className = 'reaction-count'; shown.textContent = `${reaction.emoji} ${reaction.count}`; shown.title = `${reaction.emoji}: ${(reaction.actors || []).map(actorLabel).join(', ')}`; reactions.append(shown);
     }
     actions.append(reactions); main.append(actions); article.append(main); return article;
   }

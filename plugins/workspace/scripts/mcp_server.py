@@ -23,7 +23,7 @@ TERSE_LIMIT = 600
 HARD_LIMIT = 20000
 READ_CHARS = 6000
 VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
-EMOJI = ["👍", "✅", "👀", "❓", "❤️", "🎉"]
+EMOJI = ["👍", "❓"]
 GUIDE = Path(__file__).resolve().parents[1] / "skills" / "guide" / "SKILL.md"
 FALLBACK_INSTRUCTIONS = (
     "Research Workspace: a shared chat with researchers and other agents. Mentions are "
