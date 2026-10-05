@@ -10,9 +10,11 @@
     projectCrumb: $('#project-crumb'), channelCrumb: $('#channel-crumb'), projectDescription: $('#project-description'), channelTitle: $('#channel-title'), channelDescription: $('#channel-description'),
     threadBar: $('#thread-bar'), threadTitle: $('#thread-title'), welcome: $('#welcome-state'), messagesPanel: $('#messages-panel'), messages: $('#messages-list'),
     composer: $('#composer'), input: $('#message-input'), modal: $('#modal'), modalTitle: $('#modal-title'), modalKicker: $('#modal-kicker'), modalContent: $('#modal-content'),
-    identity: $('#account-button'), setPassword: $('#set-password'), signout: $('#signout'), status: $('#connection-status'), toast: $('#global-error')
+    inbox: $('#inbox-open'), inboxBadge: $('#inbox-badge'), mentionToast: $('#mention-toast'), identity: $('#account-button'), setPassword: $('#set-password'), signout: $('#signout'), status: $('#connection-status'), toast: $('#global-error')
   };
   const state = { token: sessionStorage.getItem('commons_token') || '', me: null, projects: [], project: null, channels: [], channel: null, threads: [], thread: null, members: [], actors: [], messages: [], messageCursor: 0, eventCursor: 0, pollTimer: null, pollBusy: false, replyTo: null, pendingMentions: new Set(), toastTimer: null, busy: false, projectGeneration: 0, navigationGeneration: 0, authGeneration: 0, pendingPost: null };
+
+  const notifications = { items: [], cursor: null, displayedCursor: null, next: null, unread: 0, baseline: false, seenCursor: null, timer: null, request: null, generation: 0, revision: 0, depth: 1, error: '', pending: new Set(), opening: 0, toastTimer: null };
 
   function setStatus(label, mode = '') { ui.status.className = `connection ${mode}`; ui.status.lastChild.textContent = ` ${label}`; }
   function showError(message) { ui.toast.textContent = message; ui.toast.hidden = false; clearTimeout(state.toastTimer); state.toastTimer = setTimeout(() => { ui.toast.hidden = true; }, 6500); }
@@ -56,11 +58,14 @@
     return data;
   }
   function clearAuth(message = '', discardRecovery = true) {
+    resetNotifications();
     $('#edit-project').hidden = true; $('#edit-channel').hidden = true;
     if (discardRecovery) { recoveryGeneration++; sessionStorage.removeItem('workspace_invitation'); sessionStorage.removeItem('workspace_invitation_claims'); renderCredentialRecovery(); }
     $('#invitation-view').hidden = true;
-    $('#new-project').disabled = true; state.authGeneration++; state.projectGeneration++; state.navigationGeneration++; stopPolling(); if (ui.modal.open) ui.modal.close(); $('#token-input').value = ''; $('#login-password').value = ''; ui.input.value = ''; state.pendingPost = null; state.pendingMentions.clear(); state.replyTo = null; state.projects = []; state.channels = []; state.threads = []; state.members = []; state.actors = []; state.messages = []; state.messageCursor = 0; state.eventCursor = 0; state.token = ''; state.me = null; sessionStorage.removeItem('commons_token'); state.project = null; state.channel = null; state.thread = null;
-    ui.signin.hidden = false; ui.workspace.hidden = true; ui.identity.hidden = true; ui.setPassword.hidden = true; $('#search-form').hidden = true; $('#search-input').value = ''; ui.signout.hidden = true; ui.projects.replaceChildren(); ui.channels.textContent = 'Sign in to view projects';
+    $('#new-project').disabled = true; state.authGeneration++; state.projectGeneration++; state.navigationGeneration++; stopPolling(); if (ui.modal.open) ui.modal.close(); $('#token-input').value = ''; $('#login-password').value = ''; ui.input.value = ''; state.pendingPost = null; state.pendingMentions.clear(); state.replyTo = null; state.projects = []; state.channels = []; state.threads = []; state.members = []; state.actors = []; state.messages = []; ui.messages.replaceChildren(); state.messageCursor = 0; state.eventCursor = 0; state.token = ''; state.me = null; sessionStorage.removeItem('commons_token'); state.project = null; state.channel = null; state.thread = null;
+    ui.signin.hidden = false; ui.workspace.hidden = true; ui.identity.hidden = true; ui.identity.replaceChildren(); ui.setPassword.hidden = true; $('#search-form').hidden = true; $('#search-input').value = ''; ui.signout.hidden = true; ui.projects.replaceChildren(); ui.channels.textContent = 'Sign in to view projects';
+    ui.projectCrumb.textContent = 'Your workspace'; ui.channelCrumb.textContent = 'Select a project'; ui.projectDescription.textContent = 'PROJECT'; ui.channelTitle.textContent = 'Welcome'; ui.channelDescription.textContent = 'Choose a channel to view its conversations.'; ui.threadTitle.textContent = ''; $('#thread-select')?.remove(); clearConnectionCredential(); ui.modalContent.replaceChildren(); ui.modalTitle.textContent = ''; ui.modalKicker.textContent = ''; clearSelection(); updateComposer();
+    $('#new-channel').disabled = true; $('#members-open').disabled = true; $('#rules-open').disabled = true; $('#new-thread').hidden = true;
     if (message) $('#signin-error').textContent = message;
   }
   function renderIdentity() {
@@ -70,32 +75,160 @@
   }
   async function enterWorkspace(me, generation) {
     if (generation !== state.authGeneration) return;
-    state.me = me; $('#invitation-view').hidden = true; $('#token-input').value = ''; $('#login-password').value = '';
+    if (state.me && state.me.id !== me.id) {
+      stopPolling(); state.projectGeneration++; state.navigationGeneration++; state.project = null; state.channel = null; state.thread = null; state.projects = []; state.channels = []; state.threads = []; state.members = []; state.actors = []; state.messages = []; state.messageCursor = 0; state.eventCursor = 0; state.replyTo = null; state.pendingPost = null; state.pendingMentions.clear(); expandedReplies.clear(); expandedMessages.clear();
+      ui.input.value = ''; ui.messages.replaceChildren(); ui.projects.replaceChildren(); ui.channels.textContent = 'Choose a project'; ui.projectCrumb.textContent = 'Your workspace'; ui.channelCrumb.textContent = 'Select a project'; ui.projectDescription.textContent = 'PROJECT'; ui.channelTitle.textContent = 'Welcome'; ui.channelDescription.textContent = 'Choose a channel to view its conversations.'; ui.threadTitle.textContent = ''; $('#thread-select')?.remove();
+      $('#new-channel').disabled = true; $('#members-open').disabled = true; $('#rules-open').disabled = true; $('#new-thread').hidden = true; updateNameControls(); clearSelection(); clearConnectionCredential(); if (ui.modal.open) ui.modal.close(); ui.modalContent.replaceChildren();
+    }
+    resetNotifications(); state.me = me; $('#invitation-view').hidden = true; $('#token-input').value = ''; $('#login-password').value = '';
     ui.signin.hidden = true; ui.workspace.hidden = false; ui.identity.hidden = false; ui.signout.hidden = false; renderIdentity();
-    await loadProjects(); if (generation !== state.authGeneration) return; setStatus('Connected');
+    startNotificationPolling(); await loadProjects(); if (generation !== state.authGeneration) return; setStatus('Connected');
   }
   async function signIn(token) {
-    state.authGeneration++; const generation = state.authGeneration; state.token = token.trim(); if (!state.token) return;
+    resetNotifications(); state.authGeneration++; const generation = state.authGeneration; state.token = token.trim(); if (!state.token) return;
     setStatus('Connecting', 'busy'); $('#signin-error').textContent = '';
     try { const me = await api('/me', { silent401: true }); if (generation !== state.authGeneration) return; sessionStorage.setItem('commons_token', state.token); await enterWorkspace(me, generation); }
     catch (error) { if (generation !== state.authGeneration) return; clearAuth('', false); $('#signin-error').textContent = error.message === 'Authentication required' ? 'This token is not valid.' : error.message; setStatus('Sign in required', 'offline'); }
   }
   async function passwordSignIn(handle, password, remember = false) {
-    const generation = ++state.authGeneration; state.token = ''; sessionStorage.removeItem('commons_token'); $('#signin-error').textContent = ''; setStatus('Connecting', 'busy');
+    resetNotifications(); const generation = ++state.authGeneration; state.token = ''; sessionStorage.removeItem('commons_token'); $('#signin-error').textContent = ''; setStatus('Connecting', 'busy');
     try { const result = await mutateAuth(() => api('/auth/login', { method: 'POST', anonymous: true, silent401: true, body: { handle: handle.trim(), password, remember } })); if (generation !== state.authGeneration) return; await enterWorkspace(result.actor, generation); return generation === state.authGeneration; }
     catch (error) { if (generation !== state.authGeneration) return false; ui.signin.hidden = false; $('#invitation-view').hidden = true; $('#login-password').value = ''; $('#signin-error').textContent = error.message === 'Authentication required' ? 'Handle or password is incorrect.' : error.message; setStatus('Sign in required', 'offline'); return false; }
   }
   async function restoreSession() {
-    const generation = ++state.authGeneration;
+    resetNotifications(); const generation = ++state.authGeneration;
     try { const me = await api('/me', { silent401: true }); if (generation !== state.authGeneration) return; await enterWorkspace(me, generation); }
     catch (error) { if (generation !== state.authGeneration) return; if (error.message === 'Authentication required') { clearAuth('', false); $('#signin-error').textContent = ''; setStatus('Ready'); } else { $('#signin-error').textContent = error.message; setStatus('Unable to connect', 'offline'); } }
   }
   async function signOut() {
-    const generation = ++state.authGeneration; ui.signout.disabled = true; if (ui.modal.open) ui.modal.close(); stopPolling();
+    resetNotifications(); const generation = ++state.authGeneration; ui.signout.disabled = true; if (ui.modal.open) ui.modal.close(); stopPolling();
     try { await mutateAuth(() => api('/auth/logout', { method: 'POST', anonymous: true, silent401: true })); if (generation !== state.authGeneration) return; clearAuth(); $('#signin-error').textContent = ''; setStatus('Ready'); return true; }
-    catch (error) { if (generation !== state.authGeneration) return false; showError(`Could not sign out of the server: ${error.message} Your session may still be active. Please retry.`); startPolling(); return false; }
+    catch (error) { if (generation !== state.authGeneration) return false; showError(`Could not sign out of the server: ${error.message} Your session may still be active. Please retry.`); startPolling(); startNotificationPolling(); return false; }
     finally { ui.signout.disabled = false; }
   }
+  function inboxVisible() { return ui.modal.open && !!$('#human-inbox'); }
+  function resetNotifications() {
+    clearInterval(notifications.timer); clearTimeout(notifications.toastTimer);
+    notifications.timer = null; notifications.toastTimer = null; notifications.request = null; notifications.generation++; notifications.revision++; notifications.opening++;
+    notifications.items = []; notifications.cursor = null; notifications.displayedCursor = null; notifications.next = null; notifications.unread = 0; notifications.baseline = false; notifications.seenCursor = null; notifications.depth = 1; notifications.error = ''; notifications.pending.clear();
+    ui.inbox.hidden = true; ui.inboxBadge.hidden = true; ui.inboxBadge.textContent = ''; ui.mentionToast.hidden = true; ui.mentionToast.textContent = '';
+    if ($('#human-inbox')) { ui.modal.close(); ui.modalContent.replaceChildren(); }
+  }
+  function renderInboxBadge() {
+    ui.inbox.hidden = state.me?.kind !== 'human'; ui.inboxBadge.hidden = !notifications.unread;
+    ui.inboxBadge.textContent = notifications.unread ? String(notifications.unread) : '';
+    ui.inbox.setAttribute('aria-label', notifications.unread ? `Inbox, ${notifications.unread} unread mentions` : 'Inbox');
+  }
+  function startNotificationPolling() {
+    clearInterval(notifications.timer); notifications.timer = null; renderInboxBadge();
+    if (state.me?.kind !== 'human') return;
+    notifications.timer = setInterval(() => pollNotifications(), 5000); pollNotifications();
+  }
+  async function pollNotifications(loadOlder = false) {
+    if (state.me?.kind !== 'human' || notifications.request) return false;
+    if (loadOlder && !notifications.next) return false;
+    const generation = notifications.generation; const authGeneration = state.authGeneration; const actorId = state.me.id; const revision = notifications.revision;
+    const current = () => generation === notifications.generation && authGeneration === state.authGeneration && actorId === state.me?.id;
+    const request = {}; notifications.request = request;
+    try {
+      let before = loadOlder ? notifications.next : null; let first; let last; const items = [];
+      const pages = loadOlder ? 1 : (inboxVisible() ? notifications.depth : 1);
+      for (let page = 0; page < pages; page++) {
+        const data = await api(`/notifications?limit=50${before ? `&before=${before}` : ''}`);
+        if (!current() || revision !== notifications.revision) return false;
+        first ||= data; last = data; items.push(...(data.items || [])); before = data.next_cursor;
+        if (!before) break;
+      }
+      if (loadOlder) { const merged = new Map(notifications.items.map(item => [item.id, item])); items.forEach(item => merged.set(item.id, item)); notifications.items = [...merged.values()].sort((a, b) => b.id - a.id); notifications.depth++; }
+      else {
+        const added = notifications.baseline ? items.filter(item => item.id > (notifications.seenCursor || 0) && !item.read_at) : [];
+        if (added.length && document.visibilityState === 'visible' && !ui.workspace.hidden) {
+          ui.mentionToast.textContent = added.length === 1 ? 'You have a new mention. Open Inbox to read it.' : `${added.length} new mentions. Open Inbox to read them.`;
+          ui.mentionToast.hidden = false; clearTimeout(notifications.toastTimer); notifications.toastTimer = setTimeout(() => { ui.mentionToast.hidden = true; }, 5000);
+        }
+        notifications.items = items; notifications.cursor = first.cursor; notifications.seenCursor = Math.max(notifications.seenCursor || 0, first.cursor || 0); notifications.baseline = true;
+        if (!inboxVisible()) notifications.depth = 1;
+      }
+      notifications.next = last.next_cursor; notifications.unread = last.unread_count; notifications.error = ''; renderInboxBadge(); if (inboxVisible()) renderInbox(); return true;
+    } catch (error) {
+      if (current()) { notifications.error = 'Could not refresh your inbox. Try again.'; if (inboxVisible()) renderInbox(); } return false;
+    } finally {
+      if (notifications.request === request) notifications.request = null;
+      if (current() && inboxVisible()) renderInbox();
+      // A read or account change may have invalidated an in-flight list response.
+      if (notifications.timer && (generation !== notifications.generation || revision !== notifications.revision)) pollNotifications();
+    }
+  }
+  function showInbox() {
+    if (state.me?.kind !== 'human') return;
+    const wrap = document.createElement('div'); wrap.id = 'human-inbox'; openModal('Inbox', 'YOUR MENTIONS', wrap); renderInbox(); pollNotifications();
+  }
+  function renderInbox() {
+    const wrap = $('#human-inbox'); if (!wrap || !ui.modal.open) return;
+    const scroll = ui.modalContent.scrollTop; const focused = document.activeElement?.closest('[data-notification-action]'); const focusedAction = focused?.dataset.notificationAction; const focusedRow = focused?.closest('[data-notification-id]')?.dataset.notificationId; wrap.replaceChildren(); notifications.displayedCursor = notifications.cursor;
+    const toolbar = document.createElement('div'); toolbar.className = 'inbox-toolbar'; const summary = document.createElement('span'); summary.className = 'inbox-summary'; summary.textContent = `${notifications.unread} unread · All your projects`;
+    const all = document.createElement('button'); all.type = 'button'; all.className = 'secondary-button small'; all.textContent = 'Mark all read'; all.dataset.notificationAction = 'all'; all.disabled = !notifications.displayedCursor || !notifications.unread || notifications.pending.size > 0; all.addEventListener('click', markAllNotificationsRead); toolbar.append(summary, all); wrap.append(toolbar);
+    if (notifications.error) { const error = document.createElement('p'); error.className = 'modal-alert'; error.setAttribute('role', 'status'); error.textContent = notifications.error; const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'text-button'; retry.textContent = 'Retry'; retry.dataset.notificationAction = 'retry'; retry.addEventListener('click', () => pollNotifications()); error.append(' ', retry); wrap.append(error); }
+    if (!notifications.items.length) { const empty = document.createElement('p'); empty.className = 'empty-note'; empty.textContent = notifications.baseline ? 'No mentions yet. Mentions from your projects will appear here.' : 'Loading your mentions…'; wrap.append(empty); }
+    for (const item of notifications.items) {
+      const row = document.createElement('article'); row.className = `inbox-row${item.read_at ? '' : ' unread'}`; row.dataset.notificationId = item.id;
+      const title = document.createElement('h3'); title.textContent = `${item.message.author?.name || 'A participant'} mentioned you${item.read_at ? '' : ' · Unread'}`;
+      const route = document.createElement('div'); route.className = 'inbox-route'; route.textContent = `${item.project.name} / ${item.channel.name} / ${item.thread.title}`;
+      const time = document.createElement('time'); time.className = 'inbox-time'; time.dateTime = item.created_at || ''; time.textContent = formatDate(item.created_at);
+      const preview = document.createElement('p'); preview.className = 'inbox-preview'; preview.textContent = `${item.message.text || ''}${item.message.truncated ? '…' : ''}`;
+      const actions = document.createElement('div'); actions.className = 'inbox-actions';
+      const open = document.createElement('button'); open.type = 'button'; open.className = 'primary-button small'; open.textContent = 'Open message'; open.dataset.notificationAction = 'open'; open.disabled = (notifications.pending.has(item.id) || notifications.pending.has('all')); open.addEventListener('click', () => openNotification(item));
+      const read = document.createElement('button'); read.type = 'button'; read.className = 'secondary-button small'; read.textContent = item.read_at ? 'Mark unread' : 'Mark read'; read.dataset.notificationAction = 'read'; read.disabled = (notifications.pending.has(item.id) || notifications.pending.has('all')); read.addEventListener('click', () => setNotificationRead(item, !item.read_at)); actions.append(open, read); row.append(title, route, time, preview, actions); wrap.append(row);
+    }
+    if (notifications.next) { const older = document.createElement('button'); older.type = 'button'; older.className = 'secondary-button'; older.textContent = 'Load older mentions'; older.dataset.notificationAction = 'older'; older.disabled = !!notifications.request; older.addEventListener('click', () => pollNotifications(true)); wrap.append(older); }
+    if (focusedAction) { const target = [...wrap.querySelectorAll('[data-notification-action]')].find(element => element.dataset.notificationAction === focusedAction && element.closest('[data-notification-id]')?.dataset.notificationId === focusedRow); target?.focus({ preventScroll: true }); }
+    ui.modalContent.scrollTop = scroll;
+  }
+  async function setNotificationRead(item, read) {
+    if (state.me?.kind !== 'human' || notifications.pending.has(item.id) || notifications.pending.has('all')) return false;
+    const generation = notifications.generation; const authGeneration = state.authGeneration; notifications.pending.add(item.id); notifications.revision++; if (inboxVisible()) renderInbox();
+    try {
+      await api(`/notifications/${item.id}`, { method: 'PATCH', body: { read } });
+      if (generation !== notifications.generation || authGeneration !== state.authGeneration) return false;
+      notifications.revision++; notifications.error = ''; await pollNotifications(); return true;
+    } catch (error) { if (generation === notifications.generation && authGeneration === state.authGeneration) { notifications.error = 'Could not save the read status. Try again.'; if (!inboxVisible()) showError(notifications.error); } return false; }
+    finally { if (generation === notifications.generation) { notifications.pending.delete(item.id); if (inboxVisible()) renderInbox(); } }
+  }
+  async function markAllNotificationsRead() {
+    const through = notifications.displayedCursor; if (!through || notifications.pending.size || state.me?.kind !== 'human') return;
+    const generation = notifications.generation; const authGeneration = state.authGeneration; notifications.pending.add('all'); notifications.revision++; renderInbox();
+    try {
+      await api('/notifications/read-all', { method: 'POST', body: { through } });
+      if (generation !== notifications.generation || authGeneration !== state.authGeneration) return;
+      notifications.revision++; notifications.error = ''; await pollNotifications();
+    } catch (error) { if (generation === notifications.generation && authGeneration === state.authGeneration) notifications.error = 'Could not mark your mentions read. Try again.'; }
+    finally { if (generation === notifications.generation) { notifications.pending.delete('all'); if (inboxVisible()) renderInbox(); } }
+  }
+  async function openNotification(item) {
+    if (notifications.pending.has('all')) return false;
+    const authGeneration = state.authGeneration; const generation = notifications.generation; const opening = ++notifications.opening;
+    let navigation = state.navigationGeneration; let projectGeneration = state.projectGeneration;
+    const current = () => authGeneration === state.authGeneration && generation === notifications.generation && opening === notifications.opening && navigation === state.navigationGeneration && projectGeneration === state.projectGeneration;
+    try {
+      if (!current() || state.me?.kind !== 'human') return false;
+      if (state.project?.id !== item.project.id) {
+        const pending = selectProject(item.project); navigation = state.navigationGeneration; projectGeneration = state.projectGeneration; await pending; if (!current()) return false;
+      }
+      const channel = state.channels.find(channel => channel.id === item.channel.id); if (!channel) throw new Error('This channel is no longer available.');
+      if (state.channel?.id !== channel.id || state.thread?.id !== item.thread.id) {
+        const pending = selectChannel(channel, item.thread.id, () => { navigation = state.navigationGeneration; }); navigation = state.navigationGeneration; const loaded = await pending;
+        if (!current()) return false; if (!loaded) throw new Error('This conversation could not be opened.');
+      } else { await loadMessages(false); if (!current()) return false; }
+      const message = state.messages.find(message => message.id === item.message.id); if (!message) throw new Error('This message is no longer available.');
+      const parent = replyRootId(message); if (parent) expandedReplies.add(parent); expandedMessages.add(message.id); renderMessages();
+      const target = [...ui.messages.querySelectorAll('article[data-message-id]')].find(element => element.dataset.messageId === message.id);
+      if (!target || target.closest('[hidden]') || !current()) throw new Error('This message could not be shown.');
+      if (inboxVisible()) ui.modal.close(); target.focus({ preventScroll: true }); target.scrollIntoView?.({ block: 'center' });
+      if (document.activeElement !== target || !current()) throw new Error('This message could not be shown.');
+      if (!item.read_at) await setNotificationRead(item, true); return true;
+    } catch (error) { if (current()) { notifications.error = `${error.message} The mention is still unread.`; if (inboxVisible()) renderInbox(); else showError(notifications.error); } return false; }
+  }
+
   function passwordFields(current = false) {
     const fields = [];
     if (current) { const field = formField('Current password', 'current_password', 'password'); field.input.autocomplete = 'current-password'; fields.push(field); }
@@ -189,16 +322,16 @@
     $('#new-channel').disabled = false; $('#search-form').hidden = false; $('#members-open').disabled = false; $('#rules-open').disabled = false;
     ui.channelCrumb.textContent = 'Choose a channel'; ui.channelTitle.textContent = 'Project overview'; ui.channelDescription.textContent = project.description || 'Choose a channel to view its conversations.'; ui.projectDescription.textContent = project.name.toUpperCase();
     clearSelection();
-    const generation = state.projectGeneration; try { await Promise.all([loadChannels(), loadMembers(), loadActors()]); if (generation !== state.projectGeneration || state.project?.id !== project.id) return; const page = await api(`/projects/${encodeURIComponent(project.id)}/events?after=2147483647&limit=1`); if (generation !== state.projectGeneration || state.project?.id !== project.id) return; state.eventCursor = page.cursor ?? 0; startPolling(); }
-    catch (e) { if (e.message !== 'Authentication required') showError(e.message); }
+    const generation = state.projectGeneration; const authGeneration = state.authGeneration; try { await Promise.all([loadChannels(), loadMembers(), loadActors()]); if (authGeneration !== state.authGeneration || generation !== state.projectGeneration || state.project?.id !== project.id) return; const page = await api(`/projects/${encodeURIComponent(project.id)}/events?after=2147483647&limit=1`); if (authGeneration !== state.authGeneration || generation !== state.projectGeneration || state.project?.id !== project.id) return; state.eventCursor = page.cursor ?? 0; startPolling(); }
+    catch (e) { if (authGeneration === state.authGeneration && generation === state.projectGeneration && e.message !== 'Authentication required') showError(e.message); }
   }
   function renderProjectHeader() { ui.projectCrumb.textContent = state.project?.name || 'Your workspace'; if (state.project) ui.projectDescription.textContent = state.project.name.toUpperCase(); }
   function renderChannelHeader() { if (!state.channel) return; ui.channelCrumb.textContent = state.channel.name; ui.channelTitle.textContent = state.channel.name; ui.channelDescription.textContent = state.channel.description || 'Conversations in this channel'; }
   function updateNameControls() { const allowed = !!state.project && state.me?.kind === 'human' && isOwner(); $('#edit-project').hidden = !allowed; $('#edit-channel').hidden = !allowed || !state.channel; }
   function clearSelection() { ui.threadBar.hidden = true; ui.messagesPanel.hidden = true; ui.welcome.hidden = false; $('#welcome-thread').hidden = !state.channel; }
   async function loadChannels() {
-    if (!state.project) return; const projectId = state.project.id; const generation = state.projectGeneration;
-    const data = await api(`/projects/${encodeURIComponent(projectId)}/channels`); if (generation !== state.projectGeneration || state.project?.id !== projectId) return; state.channels = data.items || []; renderChannels();
+    if (!state.project) return; const authGeneration = state.authGeneration; const projectId = state.project.id; const generation = state.projectGeneration;
+    const data = await api(`/projects/${encodeURIComponent(projectId)}/channels`); if (authGeneration !== state.authGeneration || generation !== state.projectGeneration || state.project?.id !== projectId) return; state.channels = data.items || []; renderChannels();
     if (state.channel) { const fresh = state.channels.find(c => c.id === state.channel.id); if (!fresh) { state.channel = null; state.thread = null; clearSelection(); } else { state.channel = fresh; renderChannelHeader(); } }
     updateNameControls();
   }
@@ -210,15 +343,17 @@
       const b = document.createElement('button'); b.className = `nav-item${state.channel?.id === channel.id ? ' active' : ''}`; const symbol = document.createElement('span'); symbol.className = 'nav-symbol'; symbol.textContent = '#'; const label = document.createElement('span'); label.className = 'nav-label'; label.textContent = channel.name; b.append(symbol, label); b.addEventListener('click', () => selectChannel(channel)); ui.channels.append(b);
     }
   }
-  async function selectChannel(channel, threadId = null) {
+  async function selectChannel(channel, targetThreadId = null, onNavigate = () => {}) {
+    const authGeneration = state.authGeneration; const projectGeneration = state.projectGeneration;
     state.navigationGeneration++; state.channel = channel; state.thread = null; renderChannels(); renderChannelHeader(); updateNameControls();
     $('#new-thread').hidden = false; $('#welcome-thread').hidden = false; ui.threadBar.hidden = true; ui.messagesPanel.hidden = true; ui.welcome.hidden = false;
-    try { await loadThreads(); if (state.threads.length) await selectThread(state.threads.find(t => t.id === threadId) || state.threads[0]); }
-    catch (e) { showError(e.message); }
+    const generation = state.navigationGeneration;
+    try { await loadThreads(); if (authGeneration !== state.authGeneration || projectGeneration !== state.projectGeneration || generation !== state.navigationGeneration || state.channel?.id !== channel.id) return false; const thread = targetThreadId ? state.threads.find(t => t.id === targetThreadId) : state.threads[0]; if (targetThreadId && !thread) return false; if (!thread) return true; const pending = selectThread(thread); onNavigate(); return await pending; }
+    catch (e) { if (authGeneration === state.authGeneration && generation === state.navigationGeneration) showError(e.message); return false; }
   }
   async function loadThreads() {
-    if (!state.channel) return; const channelId = state.channel.id; const projectGeneration = state.projectGeneration; const navGeneration = state.navigationGeneration;
-    const data = await api(`/channels/${encodeURIComponent(channelId)}/threads`); if (projectGeneration !== state.projectGeneration || navGeneration !== state.navigationGeneration || state.channel?.id !== channelId) return; state.threads = data.items || [];
+    if (!state.channel) return; const authGeneration = state.authGeneration; const channelId = state.channel.id; const projectGeneration = state.projectGeneration; const navGeneration = state.navigationGeneration;
+    const data = await api(`/channels/${encodeURIComponent(channelId)}/threads`); if (authGeneration !== state.authGeneration || projectGeneration !== state.projectGeneration || navGeneration !== state.navigationGeneration || state.channel?.id !== channelId) return; state.threads = data.items || [];
     if (state.threads.length) { if (!state.thread || !state.threads.some(t => t.id === state.thread.id)) state.thread = null; }
     else { state.thread = null; }
     renderThreadChooser();
@@ -236,17 +371,19 @@
     }
   }
   async function selectThread(thread) {
+    const authGeneration = state.authGeneration; const projectGeneration = state.projectGeneration;
     expandedReplies.clear(); expandedMessages.clear(); state.navigationGeneration++; state.thread = thread; state.messageCursor = 0; state.messages = []; ui.messages.replaceChildren(); state.replyTo = null; state.pendingMentions.clear(); state.pendingPost = null; renderThreadChooser(); ui.threadTitle.textContent = thread.title; ui.threadBar.hidden = false; ui.welcome.hidden = true; ui.messagesPanel.hidden = false;
     $('#new-thread').hidden = false; $('#message-input').placeholder = 'Write a message… Use @ to mention a project member'; updateComposer();
-    try { await loadMessages(false); } catch (e) { showError(e.message); }
+    const generation = state.navigationGeneration;
+    try { await loadMessages(false); return authGeneration === state.authGeneration && projectGeneration === state.projectGeneration && generation === state.navigationGeneration && state.thread?.id === thread.id; } catch (e) { if (authGeneration === state.authGeneration && generation === state.navigationGeneration) showError(e.message); return false; }
   }
   async function loadMessages(appendOnly) {
-    if (!state.thread) return; const threadId = state.thread.id; const projectGeneration = state.projectGeneration; const navGeneration = state.navigationGeneration;
+    if (!state.thread) return; const authGeneration = state.authGeneration; const threadId = state.thread.id; const projectGeneration = state.projectGeneration; const navGeneration = state.navigationGeneration;
     const prior = state.messageCursor;
     let after = appendOnly ? prior : 0; const newItems = []; let page; let lastPageCursor = prior;
     do {
       page = await api(`/threads/${encodeURIComponent(threadId)}/messages?after=${after}&limit=100`);
-      if (projectGeneration !== state.projectGeneration || navGeneration !== state.navigationGeneration || state.thread?.id !== threadId) return;
+      if (authGeneration !== state.authGeneration || projectGeneration !== state.projectGeneration || navGeneration !== state.navigationGeneration || state.thread?.id !== threadId) return;
       newItems.push(...(page.items || [])); lastPageCursor = page.cursor ?? lastPageCursor; const next = page.next_cursor; if (next === after) break; after = next;
     } while (after !== null && after !== undefined);
     const initial = state.messages.length === 0;
@@ -385,7 +522,7 @@
     flushProse();
   }
   function buildMessage(m, root = m) {
-    const article = document.createElement('article'); article.className = 'message'; article.dataset.messageId = m.id;
+    const article = document.createElement('article'); article.className = 'message'; article.tabIndex = -1; article.dataset.messageId = m.id;
     const avatar = document.createElement('div'); avatar.className = `message-avatar${m.author?.kind === 'agent' ? ' agent' : ''}`; avatar.textContent = initials(m.author?.name); article.append(avatar);
     const main = document.createElement('div'); main.className = 'message-main';
     const meta = document.createElement('div'); meta.className = 'message-meta';
@@ -456,7 +593,7 @@
     } catch (e) { $('#composer-error').textContent = e.message; }
     finally { state.busy = false; button.disabled = false; }
   }
-  async function loadMembers() { if (!state.project) return; const projectId = state.project.id; const generation = state.projectGeneration; const data = await api(`/projects/${encodeURIComponent(projectId)}/members`); if (generation === state.projectGeneration && state.project?.id === projectId) { state.members = data.items || []; updateNameControls(); } }
+  async function loadMembers() { if (!state.project) return; const authGeneration = state.authGeneration; const projectId = state.project.id; const generation = state.projectGeneration; const data = await api(`/projects/${encodeURIComponent(projectId)}/members`); if (authGeneration === state.authGeneration && generation === state.projectGeneration && state.project?.id === projectId) { state.members = data.items || []; updateNameControls(); } }
   async function loadActors() { const generation = state.authGeneration; try { const d = await api('/actors'); if (generation === state.authGeneration) state.actors = d.items || []; } catch { if (generation === state.authGeneration) state.actors = []; } }
   function isOwner() { return state.members.some(m => m.actor.id === state.me?.id && m.role === 'owner'); }
   function openModal(title, kicker, content) { clearConnectionCredential(); ui.modalTitle.textContent = title; ui.modalKicker.textContent = kicker; ui.modalContent.replaceChildren(); ui.modalContent.append(content); if (!ui.modal.open) ui.modal.showModal(); }
@@ -674,7 +811,7 @@
     return button;
   }
   async function openInvitation(code) {
-    state.authGeneration++; state.projectGeneration++; state.navigationGeneration++; const generation = state.authGeneration;
+    resetNotifications(); state.authGeneration++; state.projectGeneration++; state.navigationGeneration++; const generation = state.authGeneration;
     const logoutGeneration = recoveryGeneration;
     stopPolling(); ui.signin.hidden = true; ui.workspace.hidden = true; $('#invitation-view').hidden = false;
     const content = $('#invitation-content'); content.replaceChildren(); const title = document.createElement('h1'); title.textContent = 'Join a research project'; content.append(title);
@@ -797,6 +934,7 @@
   $('#toggle-token').addEventListener('click', () => { const input = $('#token-input'); const shown = input.type === 'text'; input.type = shown ? 'password' : 'text'; $('#toggle-token').textContent = shown ? 'Show' : 'Hide'; $('#toggle-token').setAttribute('aria-label', shown ? 'Show token' : 'Hide token'); });
   $('#signout').addEventListener('click', () => signOut()); ui.composer.addEventListener('submit', sendMessage); ui.input.addEventListener('input', updateComposer); ui.input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ui.composer.requestSubmit(); } });
   $('#account-button').addEventListener('click', showAccount); ui.setPassword.addEventListener('click', showAccount);
+  ui.inbox.addEventListener('click', showInbox);
   $('#use-token').addEventListener('click', () => { const form = $('#signin-form'); form.hidden = !form.hidden; $('#use-token').setAttribute('aria-expanded', String(!form.hidden)); });
   $('#password-signin-form').addEventListener('submit', async event => { event.preventDefault(); const button = event.currentTarget.querySelector('[type=submit]'); button.disabled = true; try { await passwordSignIn($('#login-handle').value, $('#login-password').value, $('#login-remember').checked); } finally { button.disabled = false; } });
   const savedToken = state.token;
