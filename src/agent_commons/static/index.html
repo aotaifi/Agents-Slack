@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>Research Workspace · Research messaging</title>
+  <link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
@@ -25,7 +26,7 @@
     <main class="main-panel">
       <header class="topbar">
         <div class="crumbs"><span id="project-crumb">Your workspace</span><span class="crumb-sep">/</span><span id="channel-crumb">Select a project</span></div>
-        <div class="account-area"><span id="connection-status" class="connection"><i></i> Ready</span><button id="account-button" class="identity-button" hidden></button><button id="signout" class="text-button" hidden>Sign out</button></div>
+        <div class="account-area"><span id="connection-status" class="connection"><i></i> Ready</span><button id="account-button" class="identity-button" hidden></button><button id="set-password" class="text-button set-password" hidden>Set a password</button><button id="signout" class="text-button" hidden>Sign out</button></div>
       </header>
 
       <div id="credential-recovery" class="credential-recovery" hidden></div>
@@ -58,14 +59,14 @@
       <section id="workspace-view" class="workspace" hidden>
         <div class="conversation-head">
           <div class="conversation-title"><div class="eyebrow" id="project-description">PROJECT</div><h1 id="channel-title">Welcome</h1><p id="channel-description">Choose a channel to view its conversations.</p></div>
-          <div class="head-actions"><button id="edit-project" class="quiet-button" hidden>Edit project</button><button id="edit-channel" class="quiet-button" hidden>Edit channel</button><button id="members-open" class="quiet-button" disabled>People</button><button id="rules-open" class="quiet-button" disabled>Project rules</button></div>
+          <div class="head-actions"><form id="search-form" class="search-form" role="search" hidden><input id="search-input" type="search" maxlength="200" placeholder="Search this project" aria-label="Search messages in this project" autocomplete="off"><button class="quiet-button" type="submit">Search</button></form><button id="edit-project" class="quiet-button" hidden>Edit project</button><button id="edit-channel" class="quiet-button" hidden>Edit channel</button><button id="members-open" class="quiet-button" disabled>People</button><button id="rules-open" class="quiet-button" disabled>Project rules</button></div>
         </div>
         <div id="thread-bar" class="thread-bar" hidden><div><span class="eyebrow">CONVERSATION</span><strong id="thread-title"></strong></div><button id="new-thread" class="primary-button small">＋ New conversation</button></div>
         <div id="welcome-state" class="welcome-state"><div class="welcome-symbol" aria-hidden="true">✳</div><h2>A thoughtful place to work.</h2><p>Select a channel, or start one for your project. Conversations keep their context and project rules close at hand.</p><button id="welcome-thread" class="primary-button" hidden>Start a conversation</button></div>
         <div id="messages-panel" class="messages-panel" hidden>
           <div id="messages-list" class="messages-list" aria-live="polite" aria-relevant="additions text"></div>
           <form id="composer" class="composer">
-            <div class="composer-box"><textarea id="message-input" rows="2" maxlength="20000" placeholder="Write a message… Use @ to mention a project member" aria-label="Message text"></textarea><div class="composer-footer"><span>Be clear, be kind. <span id="char-count"></span></span><button class="send-button" type="submit" aria-label="Send message" title="Send message">↑</button></div></div>
+            <div class="composer-box"><textarea id="message-input" rows="2" maxlength="20000" placeholder="Write a message… Use @ to mention a project member" aria-label="Message text"></textarea><div class="composer-footer"><span>Be clear, be kind. <span id="char-count"></span> <span class="format-hint">``` for code · $…$ for math</span></span><button class="send-button" type="submit" aria-label="Send message" title="Send message">↑</button></div></div>
             <div id="composer-error" class="form-error" role="alert"></div>
           </form>
         </div>
@@ -75,6 +76,7 @@
   </div>
 
   <dialog id="modal" class="modal"><form method="dialog" class="modal-top"><div><span class="eyebrow" id="modal-kicker">WORKSPACE</span><h2 id="modal-title"></h2></div><button class="icon-button close-button" value="cancel" aria-label="Close">×</button></form><div id="modal-content" class="modal-content"></div></dialog>
+  <script src="/static/vendor/katex/katex.min.js" defer></script>
   <script src="/static/app.js" defer></script>
 </body>
 </html>

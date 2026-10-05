@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 from datetime import timedelta, timezone
 from pathlib import Path
@@ -11,7 +12,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Res
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, select, text, update
+from sqlalchemy import and_, func, literal_column, select, text, update
+from sqlalchemy.dialects.postgresql import to_tsvector, websearch_to_tsquery
 from sqlalchemy.orm import Session, object_session
 
 from .db import make_engine, session_factory
@@ -176,6 +178,31 @@ def messages_json(db, messages):
             }
         )
     return result
+
+
+SNIPPET_WIDTH = 200
+
+
+def search_snippet(body, terms):
+    """Plain-text excerpt of about SNIPPET_WIDTH characters around the first match."""
+    flat = " ".join(body.split())
+    lowered = flat.lower()
+    found = [lowered.find(t) for t in terms if t] if len(lowered) == len(flat) else []
+    hits = [i for i in found if i >= 0]
+    at = min(hits) if hits else 0
+    start = max(0, min(at - SNIPPET_WIDTH // 4, len(flat) - SNIPPET_WIDTH))
+    end = min(len(flat), start + SNIPPET_WIDTH)
+    return ("…" if start else "") + flat[start:end].strip() + ("…" if end < len(flat) else "")
+
+
+def search_clause(dialect, q):
+    """Message filter and snippet terms for a search string."""
+    if dialect == "postgresql":
+        vector = to_tsvector(literal_column("'simple'"), Message.text)
+        match = vector.bool_op("@@")(websearch_to_tsquery(literal_column("'simple'"), q))
+        return match, re.findall(r"\w+", q.lower())
+    terms = q.lower().split()
+    return and_(*(func.ulower(Message.text).contains(t, autoescape=True) for t in terms)), terms
 
 
 def message_json(db, m):
@@ -1611,6 +1638,55 @@ def create_app(database_url: str | None = None):
         return {
             "items": [event_json(e) for e in rows[:limit]],
             "next_cursor": rows[limit - 1].id if len(rows) > limit else None,
+            "cursor": snapshot,
+        }
+
+    @app.get("/v1/projects/{project_id}/search")
+    def search_messages(
+        project_id: str,
+        q: str = Query(...),
+        limit: int = Query(20, ge=1, le=50),
+        before: int | None = Query(None, ge=1),
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        q = q.strip()
+        if not 1 <= len(q) <= 200:
+            raise HTTPException(422, "q must be 1-200 characters")
+        p = project_access(db, a, project_id)
+        snapshot = p.cursor
+        match, terms = search_clause(db.get_bind().dialect.name, q)
+        conditions = [Message.project_id == p.id, Message.sequence <= snapshot, match]
+        if before is not None:
+            conditions.append(Message.sequence < before)
+        rows = list(
+            db.scalars(
+                select(Message)
+                .where(*conditions)
+                .order_by(Message.sequence.desc())
+                .limit(limit + 1)
+            )
+        )
+        page = rows[:limit]
+        threads = {
+            t.id: t
+            for t in db.scalars(select(Thread).where(Thread.id.in_({m.thread_id for m in page})))
+        }
+        items = [
+            {
+                "message": message,
+                "thread": {
+                    "id": threads[row.thread_id].id,
+                    "title": threads[row.thread_id].title,
+                    "channel_id": threads[row.thread_id].channel_id,
+                },
+                "snippet": search_snippet(row.text, terms),
+            }
+            for row, message in zip(page, messages_json(db, page), strict=True)
+        ]
+        return {
+            "items": items,
+            "next_before": page[-1].sequence if len(rows) > limit else None,
             "cursor": snapshot,
         }
 

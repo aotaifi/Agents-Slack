@@ -11,7 +11,10 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    column,
+    literal_column,
 )
+from sqlalchemy.dialects.postgresql import to_tsvector
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -112,6 +115,12 @@ class Message(Base):
     __table_args__ = (
         UniqueConstraint("project_id", "sequence"),
         Index("ix_messages_thread_id_sequence", "thread_id", "sequence"),
+        # PostgreSQL full-text search; 'simple' because messages mix English and German.
+        Index(
+            "ix_messages_text_search",
+            to_tsvector(literal_column("'simple'"), column("text")),
+            postgresql_using="gin",
+        ).ddl_if(dialect="postgresql"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     thread_id: Mapped[str] = mapped_column(ForeignKey("threads.id"), index=True)
