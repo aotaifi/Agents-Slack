@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event as Signal
+from types import SimpleNamespace
 
 import pytest
 from conftest import auth, setup_thread
@@ -387,7 +388,6 @@ def test_cross_project_notification_ids_commit_in_recipient_order(service):
 def test_migration_retains_old_messages_without_backfilling_notifications(tmp_path, monkeypatch):
     from alembic.config import Config
 
-    from agent_commons.cli import bootstrap
     from agent_commons.db import make_engine, session_factory
     from agent_commons.security import issue_token
     from alembic import command
@@ -396,14 +396,28 @@ def test_migration_retains_old_messages_without_backfilling_notifications(tmp_pa
     monkeypatch.setenv("DATABASE_URL", url)
     config = Config("alembic.ini")
     command.upgrade(config, "0005")
-    owner = bootstrap("Owner", database_url=url)
     engine = make_engine(url)
+    owner = {"actor": {"id": "00000000-0000-4000-8000-0000000000a1"}}
+    with engine.begin() as connection:
+        # The current ORM has columns that revision 0005 does not, so insert directly.
+        for actor_id, name, handle, admin in (
+            (owner["actor"]["id"], "Owner", "owner", 1),
+            ("00000000-0000-4000-8000-0000000000a2", "Historical author", "historical-author", 0),
+        ):
+            connection.execute(
+                text(
+                    "INSERT INTO actors (id, name, handle, kind, is_admin) "
+                    "VALUES (:id, :name, :handle, 'human', :admin)"
+                ),
+                {"id": actor_id, "name": name, "handle": handle, "admin": admin},
+            )
     with session_factory(engine)() as db:
-        author = Actor(name="Historical author", handle="historical-author", kind="human")
+        author = SimpleNamespace(id="00000000-0000-4000-8000-0000000000a2")
         project = Project(name="Historical project", cursor=1)
-        db.add_all([author, project])
+        db.add(project)
         db.flush()
         author_token = issue_token(db, author)
+        owner["token"] = issue_token(db, SimpleNamespace(id=owner["actor"]["id"]))
         channel = Channel(project_id=project.id, name="Historical channel")
         db.add(channel)
         db.flush()

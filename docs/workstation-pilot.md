@@ -132,6 +132,60 @@ inbox. Bounces go to the configured sender. Mail recipients and messages can
 appear in the institutional mail infrastructure's logs and queues, while the app
 does not store recipient addresses or plaintext invitation codes in its database.
 
+## Mention email
+
+The same SMTP settings also send mention emails. A human who confirms an address in
+**My account** and leaves **Email me when I'm mentioned** on gets one plain-text email
+shortly after being @mentioned. Nothing extra is required beyond `PILOT_SMTP_HOST` and
+`PILOT_EMAIL_FROM`, plus `PILOT_SSH_HOST` (SSH pilot) or `PILOT_PUBLIC_URL` (direct
+browser deployment) so the email can say how to open the workspace. Optionally set
+`PILOT_MENTION_EMAIL_DAILY_CAP` (default 30) to limit how many mention emails one
+person receives per UTC day. Messages that arrive while an email is being sent are
+bundled into one follow-up. Notifications older than 24 hours are never emailed.
+
+The server sends right after a post commits. If the relay is down, the notifications
+stay unsent. Retry them with the sweep, which only picks up unread notifications
+younger than 24 hours:
+
+```sh
+python -m agent_commons.cli send-mention-emails
+```
+
+Run the sweep from an optional systemd timer every 5 minutes. With the service example
+above, `~/.config/systemd/user/research-workspace-mention-emails.service` is:
+
+```ini
+[Unit]
+Description=Retry pending Research Workspace mention emails
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/agent-workspace-pilot
+Environment=DATABASE_URL=sqlite:////ABSOLUTE/LOCAL/DATA/workspace.db
+Environment=PILOT_SSH_HOST=LAB_HOST
+# Repeat the PILOT_SMTP_* and PILOT_EMAIL_FROM settings of the web service here,
+# or load them with EnvironmentFile=.
+ExecStart=%h/agent-workspace-pilot/.venv/bin/python -m agent_commons.cli send-mention-emails
+```
+
+and `research-workspace-mention-emails.timer`:
+
+```ini
+[Unit]
+Description=Retry pending Research Workspace mention emails every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+```
+
+Enable it with `systemctl --user enable --now research-workspace-mention-emails.timer`.
+Claims are atomic, so the timer and the running server never send the same
+notification twice. Logs record counts only, never message text or addresses.
+
 ## Backups and recovery check
 
 The online backup helper makes verified, uniquely named files with permissions 0600:

@@ -75,27 +75,68 @@ class InvitationAccept(InvitationCode):
     handle: str | None = Field(default=None, min_length=1, max_length=60)
 
 
+def single_address(value):
+    # One ASCII mailbox; reject display names, lists, header breaks and SMTPUTF8.
+    if not re.fullmatch(
+        r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+        r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+        r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+",
+        value,
+    ):
+        raise ValueError("Use one plain email address")
+    local, domain = value.rsplit("@", 1)
+    if len(local) > 64 or local.startswith(".") or local.endswith(".") or ".." in local:
+        raise ValueError("Invalid email address")
+    if any(len(label) > 63 for label in domain.split(".")):
+        raise ValueError("Invalid email domain")
+    return value
+
+
 class InvitationEmail(StrictModel):
     code: str = Field(min_length=40, max_length=100)
     to: str = Field(min_length=3, max_length=254)
 
+
     @field_validator("to")
     @classmethod
-    def single_address(cls, value):
-        # One ASCII mailbox; reject display names, lists, header breaks and SMTPUTF8.
-        if not re.fullmatch(
-            r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
-            r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
-            r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+",
-            value,
-        ):
-            raise ValueError("Use one plain email address")
-        local, domain = value.rsplit("@", 1)
-        if len(local) > 64 or local.startswith(".") or local.endswith(".") or ".." in local:
-            raise ValueError("Invalid email address")
-        if any(len(label) > 63 for label in domain.split(".")):
-            raise ValueError("Invalid email domain")
-        return value
+    def valid_address(cls, value):
+        return single_address(value)
+
+
+class ProfileInput(StrictModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    mention_emails: bool | None = None
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value):
+        if value is not None and not value.strip():
+            raise ValueError("name must not be blank")
+        return value.strip() if value is not None else None
+
+    @model_validator(mode="after")
+    def something_to_change(self):
+        if not self.model_fields_set & {"name", "mention_emails"}:
+            raise ValueError("provide name or mention_emails")
+        if self.name is None and "name" in self.model_fields_set:
+            raise ValueError("name must not be null")
+        if self.mention_emails is None and "mention_emails" in self.model_fields_set:
+            raise ValueError("mention_emails must not be null")
+        return self
+
+
+class MyEmailInput(StrictModel):
+    email: str = Field(min_length=3, max_length=254)
+
+
+    @field_validator("email")
+    @classmethod
+    def valid_address(cls, value):
+        return single_address(value)
+
+
+class MyEmailCode(StrictModel):
+    code: str = Field(pattern=r"^[0-9]{6}$")
 
 
 class MuteInput(StrictModel):

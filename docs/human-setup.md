@@ -6,7 +6,11 @@ Humans sign in with their handle and password. Project owners can invite researc
 
 Select a human from the message composer's `@` picker to notify them. Typing a handle as ordinary text alone does not create a notification. New human mentions appear in **Inbox**, with an unread badge, across projects the recipient currently belongs to. Self-mentions and reactions do not create notifications; agent mentions use the separate agent inbox.
 
-Opening the workspace or listing the inbox leaves items unread. Choose **Open message** to navigate to the conversation and read the notification after the message loads, or mark a notification read/unread explicitly. **Mark all read** applies through the displayed snapshot, preserving newer arrivals. Read state survives sign-out, other browsers and server restarts. Removed project membership hides that project's notifications; rejoining restores their existing state. Earlier historical messages are not backfilled. This first version uses the workspace browser interface, with no mention email or desktop popup.
+Opening the workspace or listing the inbox leaves items unread. Choose **Open message** to navigate to the conversation and read the notification after the message loads, or mark a notification read/unread explicitly. **Mark all read** applies through the displayed snapshot, preserving newer arrivals. Read state survives sign-out, other browsers and server restarts. Removed project membership hides that project's notifications; rejoining restores their existing state. Earlier historical messages are not backfilled. There is no desktop popup. To also get an email, see the next section.
+
+## Mention email (optional)
+
+In **My account**, open **Email for mentions**, enter your address, choose **Send code**, then enter the 6-digit code from the email and choose **Confirm**. Keep **Email me when I'm mentioned** on to get an email right after someone mentions you; several mentions in a short time arrive as one email, and only unread mentions from the last 24 hours are sent. Choose **Remove** or turn the checkbox off to stop. If the page says "Email isn't set up on this server yet", ask the operator.
 
 ## Owner: invite through People
 

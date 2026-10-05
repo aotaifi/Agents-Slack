@@ -247,6 +247,42 @@
     if (state.replyTo) state.replyTo = message(state.replyTo);
     renderMessages(); updateComposer();
   }
+  function mentionEmailSection(generation) {
+    const section = document.createElement('div'); section.className = 'stack-form mention-email';
+    const heading = document.createElement('h3'); heading.textContent = 'Email for mentions';
+    const status = document.createElement('div'); status.className = 'modal-alert'; let pending = false;
+    const note = text => { if (generation === state.authGeneration) status.textContent = text; };
+    const fail = error => note(error.status === 503 ? "Email isn't set up on this server yet." : error.message);
+    const button = (label, type = 'button', primary = false) => { const b = document.createElement('button'); b.type = type; b.className = primary ? 'primary-button' : 'secondary-button'; b.textContent = label; return b; };
+    const guard = async (control, work) => { control.disabled = true; note(''); try { await work(); } catch (error) { fail(error); } finally { control.disabled = false; } };
+    function render() {
+      const parts = [heading];
+      if (state.me.email_verified) {
+        const current = document.createElement('p'); current.className = 'modal-copy'; current.textContent = `Mentions are emailed to ${state.me.email}.`;
+        const remove = button('Remove'); remove.name = 'remove-email';
+        remove.addEventListener('click', () => guard(remove, async () => { await api('/me/email', { method: 'DELETE' }); if (generation !== state.authGeneration) return; state.me = { ...state.me, email: null, email_verified: false }; pending = false; render(); note('Email removed.'); }));
+        const toggle = document.createElement('label'); toggle.className = 'checkbox-label'; const box = document.createElement('input'); box.type = 'checkbox'; box.name = 'mention_emails'; box.checked = state.me.mention_emails !== false;
+        toggle.append(box, document.createTextNode("Email me when I'm mentioned"));
+        box.addEventListener('change', () => guard(box, async () => { try { const me = await api('/me', { method: 'PATCH', body: { mention_emails: box.checked } }); if (generation === state.authGeneration) state.me = { ...state.me, mention_emails: me.mention_emails }; } catch (error) { box.checked = !box.checked; throw error; } }));
+        parts.push(current, toggle, status, remove);
+      } else {
+        const intro = document.createElement('p'); intro.className = 'modal-copy'; intro.textContent = 'Get an email when someone mentions you. We send a code to confirm the address first.';
+        const address = document.createElement('form'); address.className = 'stack-form'; const email = formField('Email address', 'email', 'email'); email.input.autocomplete = 'email'; email.input.maxLength = 254;
+        const send = button(pending ? 'Send a new code' : 'Send code', 'submit', true); address.append(email.label, send);
+        address.addEventListener('submit', event => { event.preventDefault(); guard(send, async () => { await api('/me/email', { method: 'PUT', body: { email: email.input.value.trim() } }); if (generation !== state.authGeneration) return; pending = true; render(); note('Code sent. It is valid for 30 minutes.'); }); });
+        parts.push(intro, address);
+        if (pending) {
+          const confirm = document.createElement('form'); confirm.className = 'stack-form'; const code = formField('Confirmation code', 'code'); code.input.inputMode = 'numeric'; code.input.autocomplete = 'one-time-code'; code.input.maxLength = 6; code.input.pattern = '[0-9]{6}';
+          const ok = button('Confirm', 'submit', true); confirm.append(code.label, ok);
+          confirm.addEventListener('submit', event => { event.preventDefault(); guard(ok, async () => { const me = await api('/me/email/verify', { method: 'POST', body: { code: code.input.value.trim() } }); if (generation !== state.authGeneration) return; state.me = me; pending = false; render(); note('Email confirmed.'); }); });
+          parts.push(confirm);
+        }
+        parts.push(status);
+      }
+      section.replaceChildren(...parts);
+    }
+    render(); return section;
+  }
   function showAccount() {
     if (!state.me) return;
     if (state.me.kind !== 'human') { showMembers(); return; }
@@ -254,6 +290,7 @@
     const handle = formField('Handle', 'username'); handle.input.value = state.me.handle; handle.input.readOnly = true; handle.input.autocomplete = 'username'; wrap.append(handle.label);
     const profile = document.createElement('form'); profile.className = 'stack-form'; const name = formField('Display name', 'name'); name.input.value = state.me.name; name.input.maxLength = 200; const profileStatus = document.createElement('div'); profileStatus.className = 'modal-alert'; profile.append(name.label, profileStatus, actionRow('Save display name'));
     profile.addEventListener('submit', async event => { event.preventDefault(); const button = profile.querySelector('[type=submit]'); button.disabled = true; try { const me = await api('/me', { method: 'PATCH', body: { name: name.input.value.trim() } }); if (generation !== state.authGeneration) return; state.me = me; refreshOwnIdentity(me); renderIdentity(); profileStatus.textContent = 'Display name saved.'; } catch (error) { if (generation === state.authGeneration) profileStatus.textContent = error.message; } finally { button.disabled = false; } }); wrap.append(profile);
+    wrap.append(mentionEmailSection(generation));
     const form = document.createElement('form'); form.className = 'stack-form account-password'; const heading = document.createElement('h3'); heading.textContent = state.me.has_password ? 'Change my password' : 'Set my password';
     const username = document.createElement('input'); username.type = 'text'; username.name = 'username'; username.autocomplete = 'username'; username.value = state.me.handle; username.readOnly = true; username.hidden = true;
     const fields = passwordFields(!!state.me.has_password); const rememberLabel = document.createElement('label'); rememberLabel.className = 'checkbox-label'; const remember = document.createElement('input'); remember.type = 'checkbox'; remember.name = 'remember'; rememberLabel.append(remember, document.createTextNode('Keep me signed in for 30 days'));

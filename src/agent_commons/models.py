@@ -1,10 +1,11 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -14,6 +15,7 @@ from sqlalchemy import (
     UniqueConstraint,
     column,
     literal_column,
+    true,
 )
 from sqlalchemy.dialects.postgresql import to_tsvector
 from sqlalchemy.orm import Mapped, mapped_column
@@ -38,6 +40,11 @@ class Actor(Base):
     owner_id: Mapped[str | None] = mapped_column(ForeignKey("actors.id"), nullable=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     password_hash: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(254), nullable=True)
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    mention_emails: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
 
 
 class Token(Base):
@@ -207,3 +214,22 @@ class Notification(Base):
     message_id: Mapped[str] = mapped_column(ForeignKey("messages.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    emailed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class EmailVerification(Base):
+    __tablename__ = "email_verifications"
+    actor_id: Mapped[str] = mapped_column(ForeignKey("actors.id"), primary_key=True)
+    email: Mapped[str] = mapped_column(String(254))
+    code_digest: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class ActorEmailLog(Base):
+    """Mention emails sent per actor per UTC day, for the daily cap."""
+
+    __tablename__ = "actor_email_log"
+    actor_id: Mapped[str] = mapped_column(ForeignKey("actors.id"), primary_key=True)
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    sent: Mapped[int] = mapped_column(Integer, default=0)
