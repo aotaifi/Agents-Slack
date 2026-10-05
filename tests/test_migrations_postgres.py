@@ -15,7 +15,7 @@ from agent_commons.security import digest
 from alembic import command
 
 CONFIG = Path(__file__).resolve().parents[1] / "alembic.ini"
-REVISIONS = ["0002", "0003", "0004", "0005", "0006", "0007", "0008"]
+REVISIONS = ["0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009"]
 
 OWNER, AGENT = "a0000000-0000-4000-8000-000000000001", "a0000000-0000-4000-8000-000000000002"
 PROJECT = "b0000000-0000-4000-8000-000000000001"
@@ -225,13 +225,18 @@ def test_upgrade_populated_database_step_by_step_then_down_and_up(monkeypatch):
                     populate_0005(db)
             with engine.begin() as db:
                 core_data(db, revision)
-                assert search_index_exists(db) == (revision == "0008")
+                if revision == "0009":
+                    check_mention_email_columns(db)
+                assert search_index_exists(db) == (revision >= "0008")
 
         command.upgrade(config, "head")  # already there: must be a no-op
         check_app(url, expect_new_sequence=5)
 
         command.downgrade(config, "0007")
         with engine.begin() as db:
+            assert not db.scalar(
+                text("SELECT count(*) FROM information_schema.columns WHERE column_name='email'")
+            )
             core_data(db, "0007", posted=1)
             assert not search_index_exists(db)
             assert db.scalar(text("SELECT version_num FROM alembic_version")) == "0007"
@@ -239,6 +244,7 @@ def test_upgrade_populated_database_step_by_step_then_down_and_up(monkeypatch):
         with engine.begin() as db:
             assert search_index_exists(db)
             core_data(db, "0008", posted=1)
+            check_mention_email_columns(db)
             assert db.scalar(text("SELECT count(*) FROM reactions")) == 2
             assert db.scalar(text("SELECT count(*) FROM agent_connections")) == 1
         check_app_after_roundtrip(url)
@@ -248,6 +254,17 @@ def test_upgrade_populated_database_step_by_step_then_down_and_up(monkeypatch):
         with admin.connect() as connection:
             connection.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
         admin.dispose()
+
+
+def check_mention_email_columns(db):
+    """Existing actors keep working: no address, mention emails on by default."""
+    actors = db.execute(
+        text("SELECT email, email_verified_at, mention_emails FROM actors")
+    ).all()
+    assert actors and all(tuple(row) == (None, None, True) for row in actors)
+    assert db.scalar(text("SELECT count(*) FROM notifications WHERE emailed_at IS NOT NULL")) == 0
+    for table in ("email_verifications", "actor_email_log"):
+        assert db.scalar(text(f"SELECT count(*) FROM {table}")) == 0
 
 
 def check_app_after_roundtrip(url):

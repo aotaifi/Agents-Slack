@@ -9,6 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from .db import make_engine, session_factory
 from .identity import choose_handle
 from .main import actor_json
+from .mention_email import sweep
 from .models import Actor
 from .security import issue_token
 
@@ -53,13 +54,33 @@ def bootstrap(name, output=None, database_url=None):
         engine.dispose()
 
 
+def send_mention_emails(database_url=None):
+    """Retry pending mention emails; returns how many emails were submitted."""
+    engine = make_engine(database_url)
+    try:
+        return sweep(session_factory(engine))
+    except SQLAlchemyError:
+        raise ValueError("Database operation failed; run alembic upgrade head first") from None
+    finally:
+        engine.dispose()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Agent Commons offline administration")
     commands = parser.add_subparsers(dest="command", required=True)
     command = commands.add_parser("bootstrap")
     command.add_argument("--name", required=True)
     command.add_argument("--output")
+    commands.add_parser(
+        "send-mention-emails", help="send pending mention emails (retries after failures)"
+    )
     args = parser.parse_args()
+    if args.command == "send-mention-emails":
+        try:
+            print(f"Mention emails submitted: {send_mention_emails()}")
+        except ValueError as error:
+            parser.exit(1, f"{error}\n")
+        return
     try:
         result = bootstrap(args.name, args.output)
     except (ValueError, OSError) as error:

@@ -109,5 +109,31 @@ function submit(w, form) { form.dispatchEvent(new w.Event('submit', { bubbles: t
   }, { workspace_invitation_claims: JSON.stringify({ 'resume-code': { existingActorId: null, body: { code: 'resume-code', claim_secret: 'private-secret', name: me.name, handle: me.handle } } }) });
   await resumed.openInvitation('resume-code'); const resumedForm = resumed.w.document.querySelector('#invitation-content form'); assert.equal(resumedForm.querySelector('[name=confirm_password]'), null); resumedForm.querySelector('[name=password]').value = password; submit(resumed.w, resumedForm); await tick(); await tick();
   const recovered = resumed.requests.find(r => r.url === '/v1/invitations/accept'); assert.equal(recovered.credentials, 'omit', 'new-identity claim recovery excludes expired cookie'); assert.equal(recovered.body.password, undefined, 'claim recovery never changes the password'); assert.equal(resumed.requests.find(r => r.url === '/v1/auth/login').credentials, 'same-origin'); assert.equal(resumed.state.me.id, me.id); resumed.w.close();
-  console.log('Account DOM checks passed: cookie boot, signed-out boot, password login/remember, profile, password setup/change, signup secrecy, existing identity, logout errors, late-login/logout ordering and password rotation 401 races.');
+  let mailMe = { ...me, email: null, email_verified: false, mention_emails: true }; let mailOn = true; let wrongCode = true;
+  const mail = await create(req => {
+    if (req.url === '/v1/me' && !req.method) return response(mailMe);
+    if (req.url === '/v1/me' && req.method === 'PATCH') { mailMe = { ...mailMe, mention_emails: req.body.mention_emails }; return response(mailMe); }
+    if (req.url === '/v1/me/email' && req.method === 'PUT') return mailOn ? response({ status: 'code_sent' }, 202) : response({ detail: 'Email sending is not configured on this server' }, 503);
+    if (req.url === '/v1/me/email/verify') { if (wrongCode) { wrongCode = false; return response({ detail: 'That code is not correct' }, 400); } mailMe = { ...mailMe, email: req.body.code && 'alex@example.test', email_verified: true }; return response(mailMe); }
+    if (req.url === '/v1/me/email' && req.method === 'DELETE') { mailMe = { ...mailMe, email: null, email_verified: false }; return response(null, 204); }
+    return response(null, 401);
+  });
+  mail.showAccount(); const md = mail.w.document; const section = () => md.querySelector('#modal .mention-email');
+  assert.equal(section().querySelector('h3').textContent, 'Email for mentions'); assert.equal(section().querySelector('[name=code]'), null, 'no code field before a code is requested');
+  mailOn = false; section().querySelector('[name=email]').value = 'alex@example.test'; submit(mail.w, section().querySelector('[name=email]').closest('form')); await tick();
+  assert.match(section().textContent, /Email isn't set up on this server yet\./); assert.equal(section().querySelector('[name=code]'), null);
+  mailOn = true; submit(mail.w, section().querySelector('[name=email]').closest('form')); await tick();
+  assert.deepEqual(mail.requests.filter(r => r.url === '/v1/me/email' && r.method === 'PUT').at(-1).body, { email: 'alex@example.test' }); assert.match(section().textContent, /Code sent/);
+  section().querySelector('[name=code]').value = '000000'; submit(mail.w, section().querySelector('[name=code]').closest('form')); await tick();
+  assert.match(section().textContent, /not correct/); assert.equal(mail.state.me.email_verified, false); assert.ok(section().querySelector('[name=code]'), 'code field stays for another try');
+  section().querySelector('[name=code]').value = '123456'; submit(mail.w, section().querySelector('[name=code]').closest('form')); await tick();
+  assert.deepEqual(mail.requests.filter(r => r.url === '/v1/me/email/verify').at(-1).body, { code: '123456' });
+  assert.equal(mail.state.me.email_verified, true); assert.match(section().textContent, /alex@example\.test/); assert.equal(section().querySelector('[name=email]'), null);
+  const box = section().querySelector('[name=mention_emails]'); assert.equal(box.checked, true); assert.match(box.closest('label').textContent, /Email me when I'm mentioned/);
+  box.checked = false; box.dispatchEvent(new mail.w.Event('change', { bubbles: true })); await tick();
+  assert.deepEqual(mail.requests.filter(r => r.url === '/v1/me' && r.method === 'PATCH').at(-1).body, { mention_emails: false }); assert.equal(mail.state.me.mention_emails, false);
+  section().querySelector('[name=remove-email]').click(); await tick();
+  assert.equal(mail.requests.filter(r => r.url === '/v1/me/email' && r.method === 'DELETE').length, 1); assert.equal(mail.state.me.email, null); assert.ok(section().querySelector('[name=email]'), 'address form returns after Remove');
+  mail.w.close();
+  console.log('Account DOM checks passed: cookie boot, signed-out boot, password login/remember, profile, password setup/change, signup secrecy, existing identity, mention email confirmation, logout errors, late-login/logout ordering and password rotation 401 races.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

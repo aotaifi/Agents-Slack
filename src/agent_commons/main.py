@@ -5,10 +5,21 @@ import os
 import re
 import secrets
 from datetime import timedelta, timezone
+from email.message import EmailMessage
+from email.utils import format_datetime, make_msgid
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+)
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -19,12 +30,15 @@ from sqlalchemy.orm import Session, object_session
 from .db import make_engine, session_factory
 from .identity import choose_handle
 from .invitation_email import MailUnavailable, email_enabled, invitation_message, submit_invitation
+from .mail import submit_message
+from .mention_email import send_mention_emails
 from .models import (
     Actor,
     AgentConnection,
     AuthAttempt,
     BrowserSession,
     Channel,
+    EmailVerification,
     Event,
     Idempotency,
     Invitation,
@@ -51,10 +65,13 @@ from .schemas import (
     MemberRoleInput,
     MessageInput,
     MuteInput,
+    MyEmailCode,
+    MyEmailInput,
     Named,
     NotificationReadInput,
     NotificationsReadAllInput,
     PasswordInput,
+    ProfileInput,
     ProjectInput,
     ReactionInput,
     RulesInput,
@@ -73,7 +90,15 @@ def actor_json(a):
 
 
 def self_actor_json(a):
-    return {**actor_json(a), "has_password": a.password_hash is not None}
+    result = {**actor_json(a), "has_password": a.password_hash is not None}
+    if a.kind == "human":
+        # Only the verified address is ever shown, and only to its owner.
+        result.update(
+            email=a.email if a.email_verified_at is not None else None,
+            email_verified=a.email_verified_at is not None,
+            mention_emails=bool(a.mention_emails),
+        )
+    return result
 
 
 def reaction_actor(a):
@@ -662,14 +687,121 @@ def create_app(database_url: str | None = None):
 
     @app.patch("/v1/me")
     def edit_profile(
-        body: Named,
+        body: ProfileInput,
         a=Depends(authenticated, scope="function"),
         db: Session = Depends(session, scope="function"),
     ):
         human(a)
-        a.name = body.name
+        if body.name is not None:
+            a.name = body.name
+        if body.mention_emails is not None:
+            a.mention_emails = body.mention_emails
         db.flush()
         return self_actor_json(a)
+
+    CODE_TTL = timedelta(minutes=30)
+    CODE_EMAILS_PER_HOUR = 5
+    CODE_ATTEMPTS = 5
+
+    def lock_actor_row(db, a):
+        # Serializes code requests and attempts for one person on every backend.
+        return db.scalar(select(Actor).where(Actor.id == a.id).with_for_update(key_share=True))
+
+    @app.put("/v1/me/email", status_code=202)
+    def request_email_code(
+        body: MyEmailInput,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        human(a)
+        if not email_enabled():
+            raise HTTPException(503, "Email sending is not configured on this server")
+        lock_actor_row(db, a)
+        current = now()
+        key = digest("email-code:" + a.id)
+        window = db.get(AuthAttempt, key)
+        if window is None:
+            window = AuthAttempt(key=key, started_at=current, count=0)
+            db.add(window)
+        elapsed = (current - utc(window.started_at)).total_seconds()
+        if elapsed >= 3600:
+            window.started_at, window.count = current, 0
+            elapsed = 0
+        if window.count >= CODE_EMAILS_PER_HOUR:
+            db.commit()
+            raise HTTPException(
+                429,
+                "Too many confirmation codes requested; try again later",
+                headers={"Retry-After": str(max(1, int(3600 - elapsed) + 1))},
+            )
+        # Debit before sending and return normally on failure so the debit commits.
+        window.count += 1
+        code = f"{secrets.randbelow(10**6):06d}"
+        pending = db.get(EmailVerification, a.id)
+        if pending is None:
+            pending = EmailVerification(actor_id=a.id)
+            db.add(pending)
+        pending.email, pending.code_digest = body.email, digest(code)
+        pending.expires_at, pending.attempts = current + CODE_TTL, 0
+        db.flush()
+        message = EmailMessage()
+        message["From"] = os.environ["PILOT_EMAIL_FROM"]
+        message["To"] = body.email
+        message["Subject"] = "Your Research Workspace confirmation code"
+        message["Date"] = format_datetime(current)
+        message["Message-ID"] = make_msgid()
+        message["Auto-Submitted"] = "auto-generated"
+        message.set_content(
+            f"Your Research Workspace confirmation code is {code}\n\n"
+            "It expires in 30 minutes. If you did not ask for it, ignore this email.\n"
+        )
+        try:
+            submit_message(message)
+        except (MailUnavailable, ValueError, KeyError):
+            return JSONResponse(
+                status_code=502,
+                content={"detail": "The confirmation email could not be sent; try again later."},
+            )
+        return {"status": "code_sent", "expires_in_minutes": 30}
+
+    @app.post("/v1/me/email/verify")
+    def verify_email(
+        body: MyEmailCode,
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        human(a)
+        lock_actor_row(db, a)
+        pending = db.get(EmailVerification, a.id, populate_existing=True)
+        if pending is None:
+            raise HTTPException(400, "No confirmation code is pending; request a new one")
+        if utc(pending.expires_at) <= now():
+            db.delete(pending)
+            db.commit()
+            raise HTTPException(400, "The code has expired; request a new one")
+        if pending.attempts >= CODE_ATTEMPTS:
+            raise HTTPException(429, "Too many wrong codes; request a new one")
+        if not hmac.compare_digest(pending.code_digest, digest(body.code)):
+            pending.attempts += 1
+            db.commit()
+            raise HTTPException(400, "That code is not correct")
+        a.email, a.email_verified_at = pending.email, now()
+        db.delete(pending)
+        db.flush()
+        return self_actor_json(a)
+
+    @app.delete("/v1/me/email", status_code=204)
+    def remove_email(
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        human(a)
+        a.email, a.email_verified_at = None, None
+        pending = db.get(EmailVerification, a.id)
+        if pending is not None:
+            db.delete(pending)
+        db.flush()
+        return Response(status_code=204)
 
     @app.post("/v1/auth/login")
     def login(
@@ -1504,6 +1636,7 @@ def create_app(database_url: str | None = None):
         thread_id: str,
         body: MessageInput,
         response: Response,
+        background: BackgroundTasks,
         idempotency_key: str | None = Header(default=None),
         a=Depends(authenticated, scope="function"),
         db: Session = Depends(session, scope="function"),
@@ -1578,6 +1711,10 @@ def create_app(database_url: str | None = None):
             )
         result = message_json(db, m)
         emit(db, p, "message.created", result, t.id)
+        if recipients:
+            # Runs after the response, which the function-scoped session only sends once
+            # the transaction has committed; a rollback never reaches this point.
+            background.add_task(send_mention_emails, factory, [r.id for r in recipients])
         if idempotency_key is not None:
             db.add(
                 Idempotency(
