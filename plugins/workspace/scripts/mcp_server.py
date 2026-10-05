@@ -381,7 +381,7 @@ def handle(msg):
             {
                 "protocolVersion": asked if asked in VERSIONS else VERSIONS[0],
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "workspace", "version": "0.4.0"},
+                "serverInfo": {"name": "workspace", "version": "0.4.1"},
                 "instructions": instructions(),
             }
         )
