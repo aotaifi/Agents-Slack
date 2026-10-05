@@ -679,52 +679,120 @@
   async function showMembers() {
     const projectId = state.project?.id; const projectGeneration = state.projectGeneration; const authGeneration = state.authGeneration;
     try { await Promise.all([loadMembers(), loadActors()]); } catch (e) { showError(e.message); return; }
-    if (!state.me || authGeneration !== state.authGeneration || projectGeneration !== state.projectGeneration || projectId !== state.project?.id) return;
-    const wrap = document.createElement('div'); const p = document.createElement('p'); p.className = 'modal-copy'; p.textContent = isOwner() ? 'Owners invite researchers and manage roles. Guests can read and post. Agent access is managed separately.' : 'Guests can read and post. Ask a project owner to invite another researcher.'; wrap.append(p);
-    if (isOwner() && state.me.kind === 'human') {
-      const invite = document.createElement('button'); invite.type = 'button'; invite.className = 'primary-button'; invite.textContent = 'Invite researcher'; invite.addEventListener('click', () => createInvitation(projectId)); wrap.append(invite);
-      const available = state.actors.filter(a => !state.members.some(m => m.actor.id === a.id));
-      if (available.length) {
-        const form = document.createElement('form'); form.className = 'inline-form'; const select = document.createElement('select'); select.setAttribute('aria-label', 'Participant to add'); available.forEach(a => { const o = document.createElement('option'); o.value = a.id; o.textContent = `${actorLabel(a)} · ${actorDetail(a)}`; select.append(o); }); const roleSelect = rolePicker('Role for researcher'); const button = document.createElement('button'); button.type = 'submit'; button.className = 'primary-button small'; button.textContent = 'Add participant'; form.append(select, roleSelect, button); form.addEventListener('submit', async e => { e.preventDefault(); button.disabled = true; try { const actor = available.find(a => a.id === select.value); await api(`/projects/${encodeURIComponent(projectId)}/members`, { method: 'POST', body: { actor_id: select.value, role: actor.kind === 'human' ? roleSelect.value : 'member' } }); if (state.project?.id === projectId && state.authGeneration === authGeneration) await showMembers(); } catch (err) { showError(err.message); button.disabled = false; } }); wrap.append(form);
-      }
-    }
-    const list = document.createElement('div');
-    if (!state.members.length) { const empty = document.createElement('div'); empty.className = 'empty-note'; empty.textContent = 'No project members found.'; list.append(empty); }
-    for (const item of state.members) {
-      const row = document.createElement('div'); row.className = 'member-row'; const av = document.createElement('div'); av.className = `message-avatar${item.actor.kind === 'agent' ? ' agent' : ''}`; av.textContent = initials(item.actor.name); const info = document.createElement('div'); info.className = 'member-info'; const name = document.createElement('div'); name.className = 'member-name'; name.textContent = actorLabel(item.actor); const sub = document.createElement('div'); sub.className = 'member-sub'; sub.textContent = `${actorDetail(item.actor)}${item.muted ? ' · muted' : ''}`; info.append(name, sub); const actions = document.createElement('div'); actions.className = 'member-actions'; const role = document.createElement('span'); role.className = 'role-tag'; role.textContent = item.actor.kind === 'human' ? (item.role === 'owner' ? 'Owner' : 'Guest') : 'Agent'; actions.append(role);
-      if (isOwner() && state.me.kind === 'human' && item.actor.kind === 'human') {
-        const picker = rolePicker(`Role for ${item.actor.name}`); picker.value = item.role === 'owner' ? 'owner' : 'guest'; const save = document.createElement('button'); save.type = 'button'; save.className = 'secondary-button small'; save.textContent = 'Save role'; save.addEventListener('click', async () => { save.disabled = true; try { await api(`/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(item.actor.id)}/role`, { method: 'PUT', body: { role: picker.value } }); if (state.project?.id === projectId && state.authGeneration === authGeneration) await showMembers(); } catch (e) { showError(e.message); save.disabled = false; } }); actions.append(picker, save);
-      }
-      if (isOwner() && state.me.kind === 'human' && item.actor.kind === 'agent') { const toggle = document.createElement('button'); toggle.className = 'toggle'; toggle.textContent = item.muted ? 'Unmute' : 'Mute'; toggle.addEventListener('click', async () => { try { await api(`/projects/${encodeURIComponent(state.project.id)}/members/${encodeURIComponent(item.actor.id)}`, { method: 'PATCH', body: { muted: !item.muted } }); await showMembers(); } catch (e) { showError(e.message); } }); actions.append(toggle); }
-      if (ownsAgent(item.actor)) {
-        const connect = document.createElement('button'); connect.type = 'button'; connect.className = 'secondary-button small'; connect.textContent = 'Connect session';
-        connect.addEventListener('click', () => { if (projectGeneration === state.projectGeneration && authGeneration === state.authGeneration && state.project?.id === projectId) createAgentConnection(item.actor, projectId); }); actions.append(connect);
-      }
-      row.append(av, info, actions); list.append(row);
-    }
-    wrap.append(list);
-    if (state.me.kind === 'human') {
+    const stale = () => !state.me || authGeneration !== state.authGeneration || projectGeneration !== state.projectGeneration || projectId !== state.project?.id;
+    if (stale()) return;
+    const human = state.me.kind === 'human'; const owner = isOwner() && human;
+    const refresh = async () => { if (state.project?.id === projectId && state.authGeneration === authGeneration) await showMembers(); };
+    const wrap = document.createElement('div'); wrap.className = 'people-panel';
+    let connections = [];
+    if (human) {
       try {
         const data = await api(`/agent-connections?project_id=${encodeURIComponent(projectId)}`);
-        if (projectGeneration !== state.projectGeneration || authGeneration !== state.authGeneration || state.project?.id !== projectId) return;
-        appendAgentConnections(wrap, data.items || [], { projectId, projectGeneration, authGeneration });
-      } catch (error) { if (projectGeneration !== state.projectGeneration || authGeneration !== state.authGeneration) return; const note = document.createElement('p'); note.className = 'modal-alert'; note.textContent = `Could not load your session connections: ${error.message}`; wrap.append(note); }
+        if (stale()) return;
+        connections = (data.items || []).filter(connection => ownsAgent(connection.actor));
+      } catch (error) { if (stale()) return; const note = document.createElement('p'); note.className = 'modal-alert'; note.textContent = `Could not load your session connections: ${error.message}`; wrap.append(note); }
     }
-    if (isOwner() && state.me.kind === 'human') {
+    let invitations = null;
+    if (owner) {
+      const base = `/projects/${encodeURIComponent(projectId)}/invitations`;
       try {
-        const data = await api(`/projects/${encodeURIComponent(projectId)}/invitations`);
-        if (projectGeneration !== state.projectGeneration || authGeneration !== state.authGeneration) return;
-        const title = document.createElement('h3'); title.textContent = 'Invitations'; wrap.append(title);
-        for (const invitation of data.items || []) {
-          const active = !invitation.used && !invitation.revoked && Date.parse(invitation.expires_at) > Date.now();
-          const row = document.createElement('div'); row.className = 'member-row'; const label = document.createElement('span'); label.textContent = `${invitation.role === 'owner' ? 'Owner' : 'Guest'} · ${invitation.used ? 'Accepted' : invitation.revoked ? 'Withdrawn' : active ? `Expires ${new Date(invitation.expires_at).toLocaleString()}` : 'Expired'}`; row.append(label);
-          if (active) { const revoke = document.createElement('button'); revoke.type = 'button'; revoke.className = 'secondary-button small'; revoke.textContent = 'Withdraw'; revoke.addEventListener('click', async () => { revoke.disabled = true; try { await api(`/projects/${encodeURIComponent(projectId)}/invitations/${encodeURIComponent(invitation.id)}`, { method: 'DELETE' }); if (state.project?.id === projectId && state.authGeneration === authGeneration) await showMembers(); } catch (e) { showError(e.message); revoke.disabled = false; } }); row.append(revoke); } wrap.append(row);
-        }
-      } catch (e) { showError(e.message); }
+        const [open, closed] = await Promise.all([api(`${base}?state=open`), api(`${base}?state=closed&limit=100`)]);
+        if (stale()) return;
+        invitations = { open: open.items || [], closed: closed.items || [] };
+      } catch (e) { if (stale()) return; showError(e.message); }
     }
-    const footer = document.createElement('div'); footer.className = 'modal-actions';
-    if (state.me.kind === 'human') { const make = document.createElement('button'); make.type = 'button'; make.className = 'secondary-button'; make.textContent = 'Create an agent'; make.addEventListener('click', createAgent); footer.append(make); }
-    wrap.append(footer); openModal('People', state.project.name.toUpperCase(), wrap);
+    const button = (text, className, onClick) => { const b = document.createElement('button'); b.type = 'button'; b.className = className; b.textContent = text; if (onClick) b.addEventListener('click', onClick); return b; };
+    const chip = (text, kind = '') => { const c = document.createElement('span'); c.className = `chip${kind ? ` chip-${kind}` : ''}`; c.textContent = text; return c; };
+    const section = (title, count) => { const s = document.createElement('section'); s.className = 'people-section'; const head = document.createElement('div'); head.className = 'section-head'; const h = document.createElement('h3'); h.textContent = title; if (count !== undefined) { const n = document.createElement('span'); n.className = 'section-count'; n.textContent = `(${count})`; h.append(' ', n); } head.append(h); s.append(head); return s; };
+    const mutate = async (control, path, options) => { control.disabled = true; try { await api(path, options); await refresh(); } catch (e) { showError(e.message); control.disabled = false; } };
+    // A row with a name line, a chip area and, when it has actions, a "more" button that reveals them below.
+    const personRow = (item, chips, actions) => {
+      const actor = item.actor; const row = document.createElement('div'); row.className = 'member-row';
+      const av = document.createElement('div'); av.className = `message-avatar${actor.kind === 'agent' ? ' agent' : ''}`; av.textContent = initials(actor.name);
+      const info = document.createElement('div'); info.className = 'member-info'; const name = document.createElement('div'); name.className = 'member-name'; name.textContent = actor.name || 'Unknown participant';
+      const handle = document.createElement('span'); handle.className = 'member-handle'; handle.textContent = actor.handle ? `@${actor.handle}` : ''; name.append(' ', handle); info.append(name);
+      if (actor.kind === 'agent') { const sub = document.createElement('div'); sub.className = 'member-sub'; sub.textContent = actor.owner ? `owned by ${actor.owner.name}` : 'No owner'; info.append(sub); }
+      const chipBox = document.createElement('div'); chipBox.className = 'member-chips'; chipBox.append(...chips); row.append(av, info, chipBox);
+      if (actions.length) {
+        const panel = document.createElement('div'); panel.className = 'member-actions'; panel.hidden = true; panel.append(...actions);
+        const more = button('⋯', 'more-button', () => { panel.hidden = !panel.hidden; more.setAttribute('aria-expanded', String(!panel.hidden)); });
+        more.setAttribute('aria-label', `Actions for ${actor.name}`); more.setAttribute('aria-expanded', 'false'); row.append(more, panel);
+      }
+      return row;
+    };
+    const intro = document.createElement('p'); intro.className = 'modal-copy'; intro.textContent = owner ? 'Owners invite researchers and manage roles. Guests can read and post.' : 'Guests can read and post. Ask a project owner to invite another researcher.'; wrap.append(intro);
+    // People
+    const people = state.members.filter(m => m.actor.kind !== 'agent').sort((a, b) => (a.role === 'owner' ? 0 : 1) - (b.role === 'owner' ? 0 : 1) || String(a.actor.name).localeCompare(String(b.actor.name)));
+    const peopleSection = section('People', people.length);
+    if (!people.length) { const empty = document.createElement('div'); empty.className = 'empty-note'; empty.textContent = 'No project members found.'; peopleSection.append(empty); }
+    for (const item of people) {
+      const chips = [chip(item.role === 'owner' ? 'Owner' : 'Guest', item.role === 'owner' ? 'owner' : '')]; if (item.actor.id === state.me.id) chips.push(chip('You', 'you'));
+      const actions = [];
+      if (owner) { const next = item.role === 'owner' ? 'guest' : 'owner'; const change = button(next === 'owner' ? 'Make owner' : 'Make guest', 'secondary-button small', () => mutate(change, `/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(item.actor.id)}/role`, { method: 'PUT', body: { role: next } })); actions.push(change); }
+      peopleSection.append(personRow(item, chips, actions));
+    }
+    wrap.append(peopleSection);
+    // Agents
+    const agents = state.members.filter(m => m.actor.kind === 'agent').sort((a, b) => String(a.actor.name).localeCompare(String(b.actor.name)));
+    const agentSection = section('Agents', agents.length);
+    if (human) { const make = button('Create an agent', 'secondary-button small section-action', createAgent); agentSection.querySelector('.section-head').append(make); }
+    if (!agents.length) { const empty = document.createElement('div'); empty.className = 'empty-note'; empty.textContent = 'No agents in this project.'; agentSection.append(empty); }
+    for (const item of agents) {
+      const own = connections.filter(connection => connection.actor.id === item.actor.id);
+      const live = own.some(connection => !connection.revoked && connection.active);
+      const chips = [item.muted ? chip('Muted', 'muted') : live ? chip('Active session', 'active') : chip('Idle')];
+      const actions = [];
+      if (ownsAgent(item.actor)) actions.push(button('Connect session', 'secondary-button small', () => { if (projectGeneration === state.projectGeneration && authGeneration === state.authGeneration && state.project?.id === projectId) createAgentConnection(item.actor, projectId); }));
+      if (owner) { const toggle = button(item.muted ? 'Unmute' : 'Mute', 'secondary-button small', () => mutate(toggle, `/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(item.actor.id)}`, { method: 'PATCH', body: { muted: !item.muted } })); actions.push(toggle); }
+      const block = document.createElement('div'); block.className = 'agent-block'; block.append(personRow(item, chips, actions));
+      appendAgentConnections(block, own, { projectId, projectGeneration, authGeneration });
+      agentSection.append(block);
+    }
+    if (connections.length) { const note = document.createElement('p'); note.className = 'form-hint'; note.textContent = 'Active session means a session connection is alive. It does not show whether the model is working, reading a message, or replying.'; agentSection.append(note); }
+    wrap.append(agentSection);
+    // Invitations (owners only)
+    if (owner) {
+      const inviteSection = section('Invitations'); inviteSection.classList.add('invitations');
+      const toolbar = document.createElement('div'); toolbar.className = 'invite-toolbar'; toolbar.append(button('Invite researcher', 'primary-button small', () => createInvitation(projectId)));
+      const available = state.actors.filter(a => !state.members.some(m => m.actor.id === a.id));
+      if (available.length) {
+        const form = document.createElement('form'); form.className = 'inline-form'; const select = document.createElement('select'); select.setAttribute('aria-label', 'Participant to add'); available.forEach(a => { const o = document.createElement('option'); o.value = a.id; o.textContent = `${actorLabel(a)} · ${actorDetail(a)}`; select.append(o); }); const roleSelect = rolePicker('Role for researcher'); const add = document.createElement('button'); add.type = 'submit'; add.className = 'secondary-button small'; add.textContent = 'Add participant'; form.append(select, roleSelect, add);
+        form.addEventListener('submit', async e => { e.preventDefault(); add.disabled = true; try { const actor = available.find(a => a.id === select.value); await api(`/projects/${encodeURIComponent(projectId)}/members`, { method: 'POST', body: { actor_id: select.value, role: actor.kind === 'human' ? roleSelect.value : 'member' } }); await refresh(); } catch (err) { showError(err.message); add.disabled = false; } });
+        toolbar.append(form);
+      }
+      inviteSection.append(toolbar);
+      if (invitations) {
+        const pending = document.createElement('div'); pending.className = 'invitation-pending'; const pendingTitle = document.createElement('h4'); pendingTitle.textContent = `Pending (${invitations.open.length})`; pending.append(pendingTitle);
+        if (!invitations.open.length) { const empty = document.createElement('div'); empty.className = 'empty-note'; empty.textContent = 'No open invitations.'; pending.append(empty); }
+        for (const invitation of invitations.open) {
+          const row = document.createElement('div'); row.className = 'invitation-row';
+          const label = document.createElement('span'); label.className = 'invitation-label'; label.textContent = `Expires ${formatDate(invitation.expires_at)}`;
+          const revoke = button('Withdraw', 'secondary-button small', () => mutate(revoke, `/projects/${encodeURIComponent(projectId)}/invitations/${encodeURIComponent(invitation.id)}`, { method: 'DELETE' }));
+          row.append(chip(invitation.role === 'owner' ? 'Owner' : 'Guest', invitation.role === 'owner' ? 'owner' : ''), label, revoke); pending.append(row);
+        }
+        inviteSection.append(pending);
+        const history = document.createElement('details'); history.className = 'invitation-history'; const summary = document.createElement('summary'); summary.textContent = `Past invitations (${invitations.closed.length}${invitations.closed.length >= 100 ? '+' : ''})`; history.append(summary);
+        if (!invitations.closed.length) { const empty = document.createElement('div'); empty.className = 'empty-note'; empty.textContent = 'No past invitations.'; history.append(empty); }
+        for (const invitation of invitations.closed.slice(0, 10)) {
+          const row = document.createElement('div'); row.className = 'invitation-row closed';
+          const role = invitation.role === 'owner' ? 'Owner' : 'Guest';
+          const state_ = invitation.used ? `Accepted${invitation.accepted_by ? ` by @${invitation.accepted_by.handle}` : ''}` : invitation.revoked ? 'Withdrawn' : 'Expired';
+          const when = invitation.used ? invitation.used_at : invitation.revoked ? '' : invitation.expires_at;
+          row.textContent = [role, state_, when ? formatDate(when) : ''].filter(Boolean).join(' · '); history.append(row);
+        }
+        if (invitations.closed.length > 10) { const more = document.createElement('p'); more.className = 'form-hint'; more.textContent = `Showing the 10 most recent of ${invitations.closed.length}${invitations.closed.length >= 100 ? '+' : ''}.`; history.append(more); }
+        if (invitations.closed.some(invitation => !invitation.used)) {
+          const clear = button('Clear history', 'secondary-button small', async () => {
+            if (!window.confirm('Delete withdrawn and expired invitations? Accepted invitations are kept.')) return;
+            clear.disabled = true; try { await api(`/projects/${encodeURIComponent(projectId)}/invitations?state=closed`, { method: 'DELETE' }); await refresh(); } catch (e) { showError(e.message); clear.disabled = false; }
+          });
+          history.append(clear);
+        }
+        inviteSection.append(history);
+      }
+      wrap.append(inviteSection);
+    }
+    openModal('People', state.project.name.toUpperCase(), wrap);
   }
   function ownsAgent(actor) { return state.me?.kind === 'human' && actor?.kind === 'agent' && (actor.owner?.id || actor.owner_id) === state.me.id; }
   function connectionStatus(connection) {
@@ -733,14 +801,10 @@
     return connection.bound ? 'Session bound, idle/offline' : 'Not connected';
   }
   function appendAgentConnections(wrap, connections, context) {
-    const title = document.createElement('h3'); title.textContent = 'Your session connections'; wrap.append(title);
-    const copy = document.createElement('p'); copy.className = 'modal-copy'; copy.textContent = 'Activity means a session connection is alive. It does not show whether the model is working, reading a message, or replying.'; wrap.append(copy);
-    const owned = connections.filter(connection => ownsAgent(connection.actor));
-    if (!owned.length) { const empty = document.createElement('p'); empty.className = 'empty-note'; empty.textContent = 'No session connections for your agents in this project.'; wrap.append(empty); }
-    for (const connection of owned) {
+    const render = connection => {
       const row = document.createElement('div'); row.className = 'connection-row'; const info = document.createElement('div'); info.className = 'member-info';
-      const label = document.createElement('div'); label.className = 'member-name'; label.textContent = connection.label; const actor = document.createElement('div'); actor.className = 'member-sub'; actor.textContent = actorLabel(connection.actor); const status = document.createElement('div'); status.className = 'session-status'; status.textContent = connectionStatus(connection);
-      const dates = document.createElement('div'); dates.className = 'member-sub'; dates.textContent = `${connection.last_seen_at ? `Last seen ${formatDate(connection.last_seen_at)}` : 'No session activity yet'}${connection.lease_expires_at ? ` · Lease ends ${formatDate(connection.lease_expires_at)}` : ''}`; info.append(label, actor, status, dates); row.append(info);
+      const label = document.createElement('div'); label.className = 'member-name'; label.textContent = connection.label; const status = document.createElement('span'); status.className = 'session-status'; status.textContent = connectionStatus(connection); label.append(' ', status);
+      const dates = document.createElement('div'); dates.className = 'member-sub'; dates.textContent = `${connection.last_seen_at ? `Last seen ${formatDate(connection.last_seen_at)}` : 'No session activity yet'}${connection.lease_expires_at ? ` · Lease ends ${formatDate(connection.lease_expires_at)}` : ''}`; info.append(label, dates); row.append(info);
       if (!connection.revoked) {
         const revoke = document.createElement('button'); revoke.type = 'button'; revoke.className = 'secondary-button small'; revoke.textContent = 'Revoke'; revoke.setAttribute('aria-label', `Revoke ${connection.label}`);
         revoke.addEventListener('click', async () => {
@@ -750,8 +814,11 @@
           catch (error) { if (context.authGeneration === state.authGeneration && context.projectGeneration === state.projectGeneration) { showError(error.message); revoke.disabled = false; } }
         }); row.append(revoke);
       }
-      wrap.append(row);
-    }
+      return row;
+    };
+    const live = connections.filter(connection => !connection.revoked); const revoked = connections.filter(connection => connection.revoked);
+    if (live.length) { const list = document.createElement('div'); list.className = 'agent-connections'; list.append(...live.map(render)); wrap.append(list); }
+    if (revoked.length) { const details = document.createElement('details'); details.className = 'agent-connections revoked'; const summary = document.createElement('summary'); summary.textContent = `Revoked connections (${revoked.length})`; details.append(summary, ...revoked.map(render)); wrap.append(details); }
   }
   function createAgentConnection(actor, projectId) {
     if (!ownsAgent(actor) || state.project?.id !== projectId || !state.members.some(m => m.actor.id === actor.id)) return;

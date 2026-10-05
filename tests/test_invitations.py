@@ -292,3 +292,151 @@ def test_existing_identity_recovery_cannot_restore_old_role_or_hijack_identity(s
     assert client.post("/v1/invitations/accept", json=body).status_code == 403
     assert client.delete(f"/v1/projects/{pid}/members/{existing['actor']['id']}").status_code == 204
     assert client.post("/v1/invitations/accept", json=body, headers=headers).status_code == 410
+
+
+def expire(app, invitation):
+    with app.state.session_factory() as db:
+        db.get(Invitation, invitation["id"]).expires_at = now() - timedelta(minutes=5)
+        db.commit()
+
+
+def listing(client, pid, **params):
+    response = client.get(f"/v1/projects/{pid}/invitations", params=params)
+    assert response.status_code == 200, response.text
+    return response.json()["items"]
+
+
+def test_invitation_state_filter_limit_and_listing_fields(service):
+    client, app, _, _ = service
+    pid, _ = setup_thread(client)
+    pending = invite(client, pid)
+    withdrawn = invite(client, pid, "owner")
+    assert client.delete(f"/v1/projects/{pid}/invitations/{withdrawn['id']}").status_code == 204
+    expired = invite(client, pid)
+    expire(app, expired)
+    accepted = invite(client, pid)
+    assert accept(client, accepted, name="Alex Kim", handle="alex-kim").status_code == 201
+    default = listing(client, pid)
+    assert [i["id"] for i in default] == [i["id"] for i in listing(client, pid, state="all")]
+    assert [i["id"] for i in default] == [
+        accepted["id"],
+        expired["id"],
+        withdrawn["id"],
+        pending["id"],
+    ]
+    assert [i["id"] for i in listing(client, pid, state="open")] == [pending["id"]]
+    closed = listing(client, pid, state="closed")
+    assert {i["id"] for i in closed} == {accepted["id"], expired["id"], withdrawn["id"]}
+    assert closed[0]["id"] == accepted["id"]  # most recent change first
+    by_id = {i["id"]: i for i in closed}
+    assert by_id[accepted["id"]]["used"] and by_id[accepted["id"]]["used_at"]
+    assert by_id[accepted["id"]]["accepted_by"]["handle"] == "alex-kim"
+    assert by_id[withdrawn["id"]]["revoked"] and by_id[withdrawn["id"]]["accepted_by"] is None
+    assert not by_id[expired["id"]]["used"] and not by_id[expired["id"]]["revoked"]
+    assert len(listing(client, pid, state="closed", limit=2)) == 2
+    assert len(listing(client, pid, limit=1)) == 1
+    for bad in ({"state": "other"}, {"limit": 0}, {"limit": 101}):
+        assert client.get(f"/v1/projects/{pid}/invitations", params=bad).status_code == 422
+    secrets_text = str([default, closed])
+    for value in (pending, withdrawn, expired, accepted):
+        assert value["code"] not in secrets_text
+
+
+def test_clear_invitation_history_deletes_only_closed_unused_of_this_project(service):
+    client, app, _, _ = service
+    pid, _ = setup_thread(client)
+    other, _ = setup_thread(client)
+    pending = invite(client, pid)
+    withdrawn = invite(client, pid)
+    assert client.delete(f"/v1/projects/{pid}/invitations/{withdrawn['id']}").status_code == 204
+    expired = invite(client, pid)
+    expire(app, expired)
+    accepted = invite(client, pid)
+    assert accept(client, accepted, name="Kept").status_code == 201
+    foreign_withdrawn = invite(client, other)
+    assert (
+        client.delete(f"/v1/projects/{other}/invitations/{foreign_withdrawn['id']}").status_code
+        == 204
+    )
+    foreign_expired = invite(client, other)
+    expire(app, foreign_expired)
+    path = f"/v1/projects/{pid}/invitations"
+    assert client.delete(path).status_code == 422
+    assert client.delete(path, params={"state": "all"}).status_code == 422
+    assert client.delete(path, params={"state": "open"}).status_code == 422
+    assert len(listing(client, pid)) == 4
+    cleared = client.delete(path, params={"state": "closed"})
+    assert cleared.status_code == 200 and cleared.json() == {"deleted": 2}
+    assert {i["id"] for i in listing(client, pid)} == {pending["id"], accepted["id"]}
+    assert {i["id"] for i in listing(client, other)} == {
+        foreign_withdrawn["id"],
+        foreign_expired["id"],
+    }
+    assert client.delete(path, params={"state": "closed"}).json() == {"deleted": 0}
+    with app.state.session_factory() as db:
+        saved = db.get(Invitation, accepted["id"])
+        assert saved.used_at is not None and saved.accepted_actor_id
+        assert db.scalar(select(func.count()).select_from(Membership)) >= 2
+    # The retained invitations still work; the deleted ones are gone for good.
+    assert (
+        client.post(
+            "/v1/invitations/preview", json={"code": pending["code"]}, headers=ANONYMOUS
+        ).status_code
+        == 200
+    )
+    for gone in (withdrawn, expired):
+        assert (
+            client.post(
+                "/v1/invitations/preview", json={"code": gone["code"]}, headers=ANONYMOUS
+            ).status_code
+            == 404
+        )
+        assert accept(client, gone, name="Late").status_code == 404
+        assert client.delete(f"/v1/projects/{pid}/invitations/{gone['id']}").status_code == 404
+    with app.state.session_factory() as db:
+        assert db.scalar(select(func.count()).select_from(Actor).where(Actor.name == "Late")) == 0
+
+
+def test_clear_invitation_history_access_control(service):
+    client, app, _, _ = service
+    pid, _ = setup_thread(client)
+    withdrawn = invite(client, pid)
+    assert client.delete(f"/v1/projects/{pid}/invitations/{withdrawn['id']}").status_code == 204
+    guest = accept(client, invite(client, pid), name="Guest").json()
+    path = f"/v1/projects/{pid}/invitations"
+    closed = {"state": "closed"}
+    assert client.get(path, headers=auth(guest["token"])).status_code == 403
+    assert client.delete(path, params=closed, headers=auth(guest["token"])).status_code == 403
+    outsider = client.post("/v1/projects", json={"name": "Else"}).json()["id"]
+    assert client.delete(f"/v1/projects/{outsider}/invitations", params=closed).status_code == 200
+    # A project the caller does not belong to looks absent.
+    stranger = accept(client, invite(client, outsider, "owner"), name="Stranger").json()
+    assert client.delete(path, params=closed, headers=auth(stranger["token"])).status_code == 404
+    assert client.delete(path, params=closed, headers=auth("invalid")).status_code == 401
+    agent = client.post("/v1/actors", json={"name": "Agent", "kind": "agent"}).json()
+    agent_headers = auth(agent["token"])
+    assert client.delete(path, params=closed, headers=agent_headers).status_code == 404
+    added = client.post(f"/v1/projects/{pid}/members", json={"actor_id": agent["actor"]["id"]})
+    assert added.status_code in (200, 201)
+    assert client.delete(path, params=closed, headers=agent_headers).status_code == 403
+    assert client.get(path, headers=agent_headers).status_code == 403
+    assert len(listing(client, pid, state="closed")) == 2  # untouched by every refusal
+    assert client.delete(path, params=closed).json() == {"deleted": 1}
+
+
+def test_clear_invitation_history_requires_same_origin_for_browser_sessions(service):
+    client, _, _, _ = service
+    pid, _ = setup_thread(client)
+    withdrawn = invite(client, pid)
+    assert client.delete(f"/v1/projects/{pid}/invitations/{withdrawn['id']}").status_code == 204
+    password = "a sufficiently long password"
+    raw = client.post("/v1/auth/password", json={"password": password}).cookies["workspace_session"]
+    path = f"/v1/projects/{pid}/invitations"
+    headers = {"Authorization": "", "Cookie": f"workspace_session={raw}"}
+    closed = {"state": "closed"}
+    assert client.delete(path, params=closed, headers=headers).status_code == 403
+    cross = {**headers, "Origin": "https://evil.example"}
+    assert client.delete(path, params=closed, headers=cross).status_code == 403
+    assert len(listing(client, pid, state="closed")) == 1
+    same = {**headers, "Origin": "http://testserver"}
+    assert client.delete(path, params=closed, headers=same).json() == {"deleted": 1}

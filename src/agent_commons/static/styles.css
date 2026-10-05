@@ -32,3 +32,37 @@
 .inbox-button{display:flex;align-items:center;gap:6px;white-space:nowrap}.inbox-badge{background:var(--blue);color:white;border-radius:12px;font-size:10px;min-width:19px;padding:2px 5px}.mention-toast{background:var(--navy);bottom:78px}.inbox-toolbar,.inbox-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.inbox-toolbar{justify-content:space-between;margin-bottom:12px}.inbox-summary{font-size:12px;color:var(--muted)}.inbox-row{padding:16px 12px;border:1px solid var(--line);border-radius:7px;margin-bottom:10px;overflow-wrap:anywhere}.inbox-row.unread{background:var(--blue-light);border-left:3px solid var(--blue)}.inbox-row h3{font-size:13px;margin:0 0 6px}.inbox-route,.inbox-time{font-size:11px;color:var(--muted);line-height:1.5}.inbox-preview{font-size:12px;white-space:pre-wrap;line-height:1.6;margin:10px 0}.inbox-actions button{font-size:11px}.message:focus{outline:2px solid var(--blue);outline-offset:3px;border-radius:4px}@media(max-width:560px){.inbox-button{padding:6px;font-size:11px}.identity-button>span:last-child{max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 
 .mention-email{border-top:1px solid var(--line);margin-top:20px;padding-top:16px}.mention-email h3{font-size:14px;margin:0}
+.people-panel .people-section{margin:0 0 22px}
+.people-panel .people-section h3{margin:0;font-size:13px;color:#324958}
+.people-panel .section-count{font-weight:500;color:#9aa5ab}
+.people-panel .section-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}.people-panel .section-action{margin:0}
+.people-panel .member-row{flex-wrap:wrap;padding:9px 0}
+.people-panel .member-handle{font-weight:400;color:#8696a1;margin-left:4px}
+.people-panel .member-chips{display:flex;gap:6px;align-items:center;flex-shrink:0}
+.people-panel .chip{font-size:10px;line-height:1;padding:4px 7px;border-radius:10px;background:#f0f3f4;color:#657985;white-space:nowrap}
+.people-panel .chip-owner{background:var(--blue-light);color:var(--blue)}
+.people-panel .chip-you{background:#fff;border:1px solid var(--line);color:#8696a1}
+.people-panel .chip-active{background:#e6f4ea;color:#2f7d4a}
+.people-panel .chip-muted{background:#f9e9e9;color:var(--red)}
+.people-panel .more-button{border:0;background:transparent;color:#667a86;font-size:16px;line-height:1;padding:4px 8px;border-radius:5px;cursor:pointer}
+.people-panel .more-button:hover,.people-panel .more-button[aria-expanded=true]{background:#f0f3f4}
+.people-panel .member-actions{flex-basis:100%;display:flex;gap:8px;justify-content:flex-start;padding:0 0 4px 40px}
+.people-panel .member-actions[hidden]{display:none}
+.people-panel .member-actions .secondary-button{margin:0}
+.people-panel .agent-block .agent-connections{margin:0 0 6px 40px;border-left:2px solid var(--line);padding-left:12px}
+.people-panel .agent-connections summary{font-size:11px;color:#8696a1;cursor:pointer;padding:4px 0}
+.people-panel .connection-row{padding:6px 0;border-bottom:0;gap:8px}
+.people-panel .connection-row .secondary-button{margin:0}
+.people-panel .session-status{margin:0 0 0 6px;font-weight:400}
+.people-panel .invite-toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:4px 0 12px}
+.people-panel .invite-toolbar .inline-form{margin:0;flex:1;min-width:260px;flex-wrap:nowrap}
+.people-panel .invite-toolbar .inline-form select{max-width:190px}
+.people-panel h4{margin:8px 0 2px;font-size:12px;color:#657985}
+.people-panel .invitation-row{display:flex;gap:10px;align-items:center;padding:7px 0;border-bottom:1px solid #edf0f1;font-size:12px;color:#324958}
+.people-panel .invitation-row .invitation-label{flex:1}
+.people-panel .invitation-row .secondary-button{margin:0}
+.people-panel .invitation-row.closed{font-size:11px;color:#71808a}
+.people-panel .invitation-history{margin-top:12px}
+.people-panel .invitation-history summary{font-size:12px;font-weight:600;color:#657985;cursor:pointer;padding:4px 0}
+.people-panel .invitation-history>.secondary-button{margin-top:10px}
+.people-panel .form-hint{font-size:11px;color:#8696a1;margin:8px 0 0}
