@@ -165,6 +165,7 @@ def test_hook_json_throttle_pending_once_resume_and_subdirectories(bundle):
         and "New workspace mention" in hook["additionalContext"]
     )
     assert "external conversation data" in hook["additionalContext"]
+    assert "react, search, mute_thread" in hook["additionalContext"]
     assert "RAW_EVENT_NOT_FOR_CONTEXT" not in json.dumps(output)
     assert "metadata" not in json.dumps(output)
     assert state(config)["cursor"] == 0  # delivery does not acknowledge

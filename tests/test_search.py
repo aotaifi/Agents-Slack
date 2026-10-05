@@ -182,3 +182,31 @@ def test_text_is_stored_unchanged(service, q):
     raw = "```py\nprint('needle')\n``` and $x^2$ <script>"
     post(client, tid, raw)
     assert texts(search(client, pid, q)) == [raw]
+
+
+def test_old_matches_and_paging_are_identical_whatever_the_recent_window(service, monkeypatch):
+    from agent_commons import main
+
+    client, *_ = service
+    pid, tid = setup_thread(client)
+    def body(n):
+        return f"common entry {n}" + (" ancient" if n < 3 else "")
+
+    for n in range(30):
+        post(client, tid, body(n))
+    expected_all = [body(n) for n in range(29, 9, -1)]
+    results = {}
+    for window in (2000, 5, 1):
+        monkeypatch.setattr(main, "SEARCH_RECENT_WINDOW", window)
+        everything = search(client, pid, "common", limit=50).json()
+        newest = search(client, pid, "common", limit=20).json()
+        paged = search(client, pid, "common", limit=20, before=newest["next_before"]).json()
+        old = search(client, pid, "ancient")
+        results[window] = (everything, newest, paged, old.json())
+        assert [i["message"]["text"] for i in newest["items"]] == expected_all
+        assert [i["message"]["text"] for i in paged["items"]] == [
+            body(n) for n in range(9, -1, -1)
+        ]
+        assert texts(old) == [body(2), body(1), body(0)]
+        assert old.json()["next_before"] is None
+    assert results[2000] == results[5] == results[1]

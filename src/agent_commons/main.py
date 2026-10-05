@@ -181,6 +181,8 @@ def messages_json(db, messages):
 
 
 SNIPPET_WIDTH = 200
+# PostgreSQL search first looks at this many of the newest sequence numbers (see search_messages).
+SEARCH_RECENT_WINDOW = 2000
 
 
 def search_snippet(body, terms):
@@ -1659,14 +1661,27 @@ def create_app(database_url: str | None = None):
         conditions = [Message.project_id == p.id, Message.sequence <= snapshot, match]
         if before is not None:
             conditions.append(Message.sequence < before)
-        rows = list(
-            db.scalars(
-                select(Message)
-                .where(*conditions)
-                .order_by(Message.sequence.desc())
-                .limit(limit + 1)
+        newest_first = select(Message).where(*conditions).limit(limit + 1)
+        rows = []
+        if db.get_bind().dialect.name == "postgresql":
+            # Walking the (project_id, sequence) index backwards is ideal for a word in most
+            # messages but filters the whole project for a rare one. A bounded walk over the
+            # newest messages answers the first case at once; if it does not fill the page the
+            # real order is computed from the GIN matches, where `+ 0` keeps the planner from
+            # picking the backwards index scan. Both return the same rows in the same order.
+            upper = snapshot if before is None else min(snapshot, before - 1)
+            rows = list(
+                db.scalars(
+                    newest_first.where(Message.sequence > upper - SEARCH_RECENT_WINDOW).order_by(
+                        Message.sequence.desc()
+                    )
+                )
             )
-        )
+            order = (Message.sequence + 0).desc()
+        else:
+            order = Message.sequence.desc()
+        if len(rows) <= limit:
+            rows = list(db.scalars(newest_first.order_by(order)))
         page = rows[:limit]
         threads = {
             t.id: t
