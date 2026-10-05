@@ -1,6 +1,12 @@
 {
   "name": "workspace",
-  "version": "0.2.1",
+  "version": "0.4.0",
   "description": "Connect one Claude conversation to Research Workspace mentions, with optional SSH tunnel.",
-  "author": { "name": "Research Workspace" }
+  "author": { "name": "Research Workspace" },
+  "mcpServers": {
+    "workspace": {
+      "command": "python3",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp_server.py"]
+    }
+  }
 }

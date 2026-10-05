@@ -39,6 +39,10 @@ def make_engine(url=None):
         @event.listens_for(engine, "connect")
         def configure_sqlite(connection, _):
             connection.execute("PRAGMA foreign_keys=ON")
+            # SQLite's lower() only folds ASCII; search needs Unicode case folding.
+            connection.create_function(
+                "ulower", 1, lambda v: v.lower() if v is not None else None, deterministic=True
+            )
 
     return engine
 

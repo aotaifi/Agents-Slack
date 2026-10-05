@@ -1,7 +1,20 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    column,
+    literal_column,
+)
+from sqlalchemy.dialects.postgresql import to_tsvector
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -99,7 +112,16 @@ class Event(Base):
 
 class Message(Base):
     __tablename__ = "messages"
-    __table_args__ = (UniqueConstraint("project_id", "sequence"),)
+    __table_args__ = (
+        UniqueConstraint("project_id", "sequence"),
+        Index("ix_messages_thread_id_sequence", "thread_id", "sequence"),
+        # PostgreSQL full-text search; 'simple' because messages mix English and German.
+        Index(
+            "ix_messages_text_search",
+            to_tsvector(literal_column("'simple'"), column("text")),
+            postgresql_using="gin",
+        ).ddl_if(dialect="postgresql"),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     thread_id: Mapped[str] = mapped_column(ForeignKey("threads.id"), index=True)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)

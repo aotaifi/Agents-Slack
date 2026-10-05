@@ -2,15 +2,12 @@ from datetime import timedelta
 from unittest.mock import MagicMock
 
 import pytest
+from conftest import auth, setup_thread
 from sqlalchemy import select
-from test_api import auth, setup_thread
-from test_api import service as api_service
 from test_invitations import ANONYMOUS, accept, invite
 
 from agent_commons import invitation_email, main
 from agent_commons.models import Invitation, now
-
-service = api_service
 
 
 @pytest.fixture

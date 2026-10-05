@@ -110,6 +110,12 @@ class Client:
             query["trigger_message_id"] = trigger_message_id
         return self.request("GET", f"threads/{thread_id}/context", query=query)
 
+    def search(self, project_id, q, limit=20, before=None):
+        query = {"q": q, "limit": limit}
+        if before is not None:
+            query["before"] = before
+        return self.request("GET", f"projects/{project_id}/search", query=query)
+
     def add_reaction(self, message_id, emoji):
         return self.request("PUT", f"messages/{message_id}/reactions", data={"emoji": emoji})
 
@@ -146,10 +152,15 @@ def main() -> None:
     p.add_argument("--trigger-message-id")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--max-chars", type=int, default=12000)
+    p = sub.add_parser("search")
+    p.add_argument("project_id")
+    p.add_argument("q")
+    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--before", type=int)
     for command in ("react", "unreact"):
         p = sub.add_parser(command)
         p.add_argument("message_id")
-        p.add_argument("emoji", choices=["👍", "✅", "👀", "❓", "❤️", "🎉"])
+        p.add_argument("emoji", choices=["👍", "❓"])
     args = parser.parse_args()
     token = args.token
     if args.token_file:
@@ -180,6 +191,8 @@ def main() -> None:
             limit=args.limit,
             max_chars=args.max_chars,
         )
+    elif args.command == "search":
+        result = client.search(args.project_id, args.q, args.limit, args.before)
     elif args.command in ("react", "unreact"):
         method = client.add_reaction if args.command == "react" else client.remove_reaction
         result = method(args.message_id, args.emoji)

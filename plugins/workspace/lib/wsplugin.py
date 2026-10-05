@@ -357,6 +357,7 @@ def status(session_id, *, check=False, transport=None, tunnels=None, base=None):
             "ended": state["ended"],
             "error": state["error"],
             "pending": bool(state["pending"]),
+            "muted_threads": list(state.get("muted_threads", [])),
         }
     spec = meta_of(directory).get("tunnel")
     if spec:
@@ -392,13 +393,17 @@ def inbox(session_id, cwd, *, transport=None, base=None):
         raise
 
 
-def act(action, session_id, cwd, *, text=None, mentions=(), transport=None, base=None):
+def act(
+    action, session_id, cwd, *, text=None, mentions=(), thread_id=None, transport=None, base=None
+):
     workspace, _ = load(session_id, transport=transport, base=base)
     if text is not None:
         token = read_private(workspace.config["credentials"]).get("token", "")
         if token and token in text:
             raise AdapterError("Reply text contains the connection credential; refusing to post.")
-    return workspace.command(action, session=session_id, cwd=cwd, text=text, mentions=mentions)
+    return workspace.command(
+        action, session=session_id, cwd=cwd, text=text, mentions=mentions, thread_id=thread_id
+    )
 
 
 def disconnect(session_id, *, transport=None, tunnels=None, base=None):
@@ -485,6 +490,10 @@ def parser():
         if name == "reply":
             x.add_argument("--text-file")
             x.add_argument("--mention", action="append", default=[])
+    for name in ("mute", "unmute"):
+        x = sub.add_parser(name)
+        x.add_argument("--config", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+        x.add_argument("thread_id")
     t = sub.add_parser("tunnel")
     t.add_argument("what", choices=("up", "stop", "list"))
     return p
@@ -529,7 +538,12 @@ def main(argv=None):
                     else:
                         text = sys.stdin.read(20001)
                 result = act(
-                    args.action, sid, cwd, text=text, mentions=getattr(args, "mention", ())
+                    args.action,
+                    sid,
+                    cwd,
+                    text=text,
+                    mentions=getattr(args, "mention", ()),
+                    thread_id=getattr(args, "thread_id", None),
                 )
         print(json.dumps(result, ensure_ascii=False))
         return 0

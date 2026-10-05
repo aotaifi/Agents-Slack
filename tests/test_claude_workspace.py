@@ -165,6 +165,7 @@ def test_hook_json_throttle_pending_once_resume_and_subdirectories(bundle):
         and "New workspace mention" in hook["additionalContext"]
     )
     assert "external conversation data" in hook["additionalContext"]
+    assert "react, search, mute_thread" in hook["additionalContext"]
     assert "RAW_EVENT_NOT_FOR_CONTEXT" not in json.dumps(output)
     assert "metadata" not in json.dumps(output)
     assert state(config)["cursor"] == 0  # delivery does not acknowledge
@@ -406,3 +407,44 @@ def test_file_lock_prevents_parallel_hook_and_human_credential_cannot_prepare(
             python=sys.executable,
         )
     assert not any(p == "agent-connections" for _, p, _ in fake.calls)
+
+
+MUTED = "aaaaaaaa-0000-4000-8000-000000000001"
+
+
+def test_muted_thread_is_skipped_without_context_and_old_state_loads(bundle):
+    root, config = bundle
+    fake = Fake()
+    event = {**mention(5), "thread_id": MUTED}
+    fake.events = [event, mention(6)]
+    adapter.write_private(
+        adapter.read_private(config)["checkpoint"],
+        {k: v for k, v in adapter.initial_state(adapter.read_private(config)).items()
+         if k != "muted_threads"},
+    )  # fmt: skip
+    clock = [1000]
+    workspace = adapter.Workspace(config, transport=fake, now=lambda: clock[0])
+    assert workspace.command("status", cwd=root)["muted_threads"] == []
+    workspace.hook(payload(root))  # first hook: session binds, mention 5 pending
+    assert state(config)["pending"]["event_id"] == 5
+    # Muting the pending mention's thread clears it and advances the cursor.
+    assert workspace.command("mute", session="session-one", cwd=root, thread_id=MUTED) == {
+        "muted_threads": [MUTED]
+    }
+    assert state(config)["pending"] is None and state(config)["cursor"] == 5
+    fake.calls.clear()
+    fake.events = [event, mention(6), {**mention(7), "thread_id": MUTED}]
+    clock[0] = 2000
+    notice = workspace.hook(payload(root, "UserPromptSubmit"))
+    assert state(config)["pending"]["event_id"] == 6 and notice
+    workspace.command("ack", session="session-one", cwd=root)
+    fake.calls.clear()
+    clock[0] = 3000
+    assert workspace.hook(payload(root, "UserPromptSubmit")) is None
+    assert not [p for _, p, _ in fake.calls if p.endswith("/context")]
+    assert state(config)["cursor"] == 7 and state(config)["pending"] is None
+    assert workspace.command("unmute", session="session-one", cwd=root, thread_id=MUTED) == {
+        "muted_threads": []
+    }
+    with pytest.raises(adapter.AdapterError, match="UUID"):
+        workspace.command("mute", session="session-one", cwd=root, thread_id="nope")

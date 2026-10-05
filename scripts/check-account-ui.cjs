@@ -36,7 +36,7 @@ function submit(w, form) { form.dispatchEvent(new w.Event('submit', { bubbles: t
     if (req.url === '/v1/auth/logout') return response(null, 204);
     return response(null, 401);
   });
-  const d = account.w.document;
+  const d = account.w.document; assert.equal(d.querySelector('#set-password').hidden, true);
   assert.equal(d.querySelector('#login-handle').autocomplete, 'username'); assert.equal(d.querySelector('#login-password').autocomplete, 'current-password'); assert.equal(d.querySelector('#login-remember').checked, false);
   d.querySelector('#login-handle').value = me.handle; d.querySelector('#login-password').value = password; d.querySelector('#login-remember').checked = true;
   submit(account.w, d.querySelector('#password-signin-form')); await tick();
@@ -51,8 +51,10 @@ function submit(w, form) { form.dispatchEvent(new w.Event('submit', { bubbles: t
   assert.equal(account.state.token, ''); assert.equal(d.querySelector('.account-password [name=password]').value, '');
   account.w.sessionStorage.setItem('workspace_invitation_claims', '{}'); await account.signOut(); assert.equal(account.state.me, null); assert.equal(account.ui.signin.hidden, false); assert.equal(account.w.sessionStorage.getItem('workspace_invitation_claims'), null); account.w.close();
   const setup = await create(req => req.url === '/v1/me' ? response({ ...me, has_password: false }) : req.url === '/v1/auth/password' ? response({ actor: me }) : response(null, 401), { commons_token: 'human-backup-token' });
-  assert.equal(setup.w.document.querySelector('#modal-title').textContent, 'My account'); form = setup.w.document.querySelector('.account-password'); assert.equal(form.querySelector('[name=current_password]'), null);
-  form.querySelector('[name=password]').value = password; form.querySelector('[name=confirm_password]').value = password; submit(setup.w, form); await tick(); assert.equal(setup.requests.find(r => r.url === '/v1/auth/password').headers.get('Authorization'), 'Bearer human-backup-token'); assert.equal(setup.state.token, ''); assert.equal(setup.w.sessionStorage.getItem('commons_token'), null); setup.w.close();
+  const setupDoc = setup.w.document; const setLink = setupDoc.querySelector('#set-password');
+  assert.equal(setup.dom.window.document.querySelector('#modal').open, false, 'token sign-in must not auto-open the account dialog'); assert.equal(setLink.hidden, false); assert.equal(setLink.textContent, 'Set a password'); assert.equal(setupDoc.querySelector('#account-button').hidden, false);
+  setLink.click(); assert.equal(setupDoc.querySelector('#modal').open, true); assert.equal(setupDoc.querySelector('#modal-title').textContent, 'My account'); form = setup.w.document.querySelector('.account-password'); assert.equal(form.querySelector('[name=current_password]'), null);
+  form.querySelector('[name=password]').value = password; form.querySelector('[name=confirm_password]').value = password; submit(setup.w, form); await tick(); assert.equal(setup.requests.find(r => r.url === '/v1/auth/password').headers.get('Authorization'), 'Bearer human-backup-token'); assert.equal(setup.state.token, ''); assert.equal(setup.w.sessionStorage.getItem('commons_token'), null); assert.equal(setLink.hidden, true, 'link disappears once a password exists'); setup.w.close();
   for (const hasPassword of [false, true]) {
     let rotatedActor = { ...me, has_password: hasPassword }; let finishRotation; const pendingPolls = [];
     const rotation = await create(req => {

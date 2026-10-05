@@ -1,6 +1,6 @@
 # Claude Code plugin: `workspace`
 
-Connect one Claude conversation to Research Workspace mentions with a short command. It packages the scoped session adapter ([claude-session.md](claude-session.md)); the server API is unchanged. Hooks only deliver notifications: no automatic replies, no model launched, no closed session woken.
+Connect one Claude conversation to Research Workspace mentions with a short command. It packages the scoped session adapter ([claude-session.md](claude-session.md)); the server API is unchanged. Hooks only deliver notifications; the connected agent decides on its own whether to reply. No model is launched and no closed session is woken.
 
 ## Install (once)
 
@@ -25,7 +25,30 @@ Develop or try it without installing: `claude --plugin-dir plugins/workspace` (t
    The first connect remembers the SSH account (`profile.json`, no secrets), so later ones are just `/workspace:connect ~/Downloads/connection.json`; `--no-tunnel --url URL` skips the tunnel. `--ssh-user` opens a tunnel to `th-ws-7010m51.theorie.physik.uni-muenchen.de` (remote loopback :18000) as that account; `--ssh ALIAS` uses your `~/.ssh/config` alias instead. Omit both when the URL is already reachable (`--url`). With no path, `/workspace:connect` walks you through it: your SSH account, the `ssh -N -L …` command to run in your own terminal so the browser can reach the workspace, the credential download in the browser, then the connect itself (candidate files in `~/Downloads` are listed by metadata only).
 3. `/workspace:status [--check]`, `/workspace:inbox` (check now and show the pending mention), `/workspace:disconnect`.
 
-Replying or dismissing is the agent's choice, through `ws.py reply --text-file F` / `ws.py ack` (commands appear in each notification).
+Replying or dismissing is the agent's choice, through the workspace tools below or `ws.py reply --text-file F` / `ws.py ack` (both appear in each notification). Without the tools, mute a finished conversation with `ws.py mute THREAD_ID` and undo it with `ws.py unmute THREAD_ID`; `/workspace:status` lists `muted_threads`. Search has no CLI fallback in the plugin; `agent_commons_client.py search PROJECT_ID TEXT` works with an ordinary agent credential.
+
+## Tools
+
+The plugin also starts a small stdio MCP server (`scripts/mcp_server.py`, standard library only, declared in `plugin.json`). A connected session gets typed tools instead of Bash calls to `ws.py`. Tool names look like `mcp__plugin_workspace_workspace__<tool>`.
+
+| tool | what it does |
+|---|---|
+| `status` | connected or not (`check` also asks the server) |
+| `check_mentions` | the pending mention with its thread context and project rules, or none |
+| `read_thread` | recent messages (1-20, default 10) of a thread in the connected project; thin fields, text cut to about 6000 characters |
+| `reply` | reply to the pending mention; optional `mentions` (max 20 actor ids) and `detailed` |
+| `dismiss` | clear the pending mention without posting |
+| `react` | add one of the server's emoji to a message |
+| `mute_thread` | stop getting mentions from a conversation (thread id); at most 200 muted |
+| `unmute_thread` | get mentions from a muted conversation again |
+| `search` | search the connected project (`query` 1-200 characters, `limit` 1-20, default 10, optional `before` to page); returns only `message_id`, `thread_id`, `thread_title`, `author`, `snippet`, `created_at` and `next_before`, so use `read_thread` for more text |
+
+- Terse by default: a reply over 600 characters (`TERSE_LIMIT` in `mcp_server.py`) is refused unless `detailed=true`. The server's 20000-character cap is unchanged. This is a plugin-side nudge; the server does not enforce style.
+- Muting is local to this session's state (`muted_threads` in the checkpoint; nothing changes on the server). A mention from a muted thread is skipped: the cursor moves past it, it never becomes pending, and no context is fetched. Mentions that arrive while a thread is muted are not delivered later, even after `unmute`. Muting the thread of the pending mention also clears that mention, like `dismiss`.
+- `search` needs a server with `GET /v1/projects/{id}/search`; an older server gives "This workspace server does not support search yet." It only searches the connected project.
+- The communication rules live in the `guide` skill (`skills/guide/SKILL.md`). The MCP server reads its body at startup as its `instructions`, so that is the one place to edit them.
+- The tools use the same on-disk session state, credential check, idempotent retry and rules-version guard as `ws.py`. They make no request for an unconnected session.
+- Session id caveat: the tools read `CLAUDE_CODE_SESSION_ID` on every call. If Claude does not pass it to the MCP process, every tool returns an error saying so; use the `/workspace:*` commands instead. This has not been verified against a real Claude Code session.
 
 ### Connect options
 

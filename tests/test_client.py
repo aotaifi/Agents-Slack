@@ -1,10 +1,9 @@
 import json
 import sys
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
+from stubs import JsonHandler
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "clients" / "python"))
 from agent_commons_client import ApiError, Client  # noqa: E402
@@ -12,47 +11,33 @@ from agent_commons_client import ApiError, Client  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from two_clients import write_secret  # noqa: E402
 
+JSON = "application/json"
+
 
 @pytest.fixture
-def server():
+def server(stub_server):
     seen = {}
 
-    class Handler(BaseHTTPRequestHandler):
+    class Handler(JsonHandler):
         def do_GET(self):
             seen["path"] = self.path
             seen["auth"] = self.headers.get("Authorization")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"items":[],"next_cursor":12,"cursor":18}')
+            self.send_json({"items": [], "next_cursor": 12, "cursor": 18}, content_type=JSON)
 
         def do_POST(self):
             seen["key"] = self.headers.get("Idempotency-Key")
-            seen["payload"] = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            self.send_response(409)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"detail":"key conflicts with existing body"}')
+            seen["payload"] = self.read_json()
+            self.send_json({"detail": "key conflicts with existing body"}, 409, JSON)
 
         def do_PUT(self):
             seen["method"] = self.command
             seen["path"] = self.path
-            seen["payload"] = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b'{"reactions":[]}')
+            seen["payload"] = self.read_json()
+            self.send_json({"reactions": []})
 
         do_DELETE = do_PUT
 
-        def log_message(self, *_):
-            pass
-
-    httpd = HTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    thread.start()
-    yield Client(f"http://127.0.0.1:{httpd.server_port}", "example-token"), seen
-    httpd.shutdown()
-    thread.join()
+    return Client(stub_server(Handler), "example-token"), seen
 
 
 def test_event_cursor_and_bearer_header(server):

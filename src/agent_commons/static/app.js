@@ -1,7 +1,7 @@
 (() => {
   'use strict';
   const API = '/v1';
-  const REACTIONS = ['👍', '✅', '👀', '❓', '❤️', '🎉'];
+  const REACTIONS = ['👍', '❓'];
   const expandedReplies = new Set();
   const expandedMessages = new Set();
   const $ = (s) => document.querySelector(s);
@@ -10,7 +10,7 @@
     projectCrumb: $('#project-crumb'), channelCrumb: $('#channel-crumb'), projectDescription: $('#project-description'), channelTitle: $('#channel-title'), channelDescription: $('#channel-description'),
     threadBar: $('#thread-bar'), threadTitle: $('#thread-title'), welcome: $('#welcome-state'), messagesPanel: $('#messages-panel'), messages: $('#messages-list'),
     composer: $('#composer'), input: $('#message-input'), modal: $('#modal'), modalTitle: $('#modal-title'), modalKicker: $('#modal-kicker'), modalContent: $('#modal-content'),
-    identity: $('#account-button'), signout: $('#signout'), status: $('#connection-status'), toast: $('#global-error')
+    identity: $('#account-button'), setPassword: $('#set-password'), signout: $('#signout'), status: $('#connection-status'), toast: $('#global-error')
   };
   const state = { token: sessionStorage.getItem('commons_token') || '', me: null, projects: [], project: null, channels: [], channel: null, threads: [], thread: null, members: [], actors: [], messages: [], messageCursor: 0, eventCursor: 0, pollTimer: null, pollBusy: false, replyTo: null, pendingMentions: new Set(), toastTimer: null, busy: false, projectGeneration: 0, navigationGeneration: 0, authGeneration: 0, pendingPost: null };
 
@@ -60,25 +60,24 @@
     if (discardRecovery) { recoveryGeneration++; sessionStorage.removeItem('workspace_invitation'); sessionStorage.removeItem('workspace_invitation_claims'); renderCredentialRecovery(); }
     $('#invitation-view').hidden = true;
     $('#new-project').disabled = true; state.authGeneration++; state.projectGeneration++; state.navigationGeneration++; stopPolling(); if (ui.modal.open) ui.modal.close(); $('#token-input').value = ''; $('#login-password').value = ''; ui.input.value = ''; state.pendingPost = null; state.pendingMentions.clear(); state.replyTo = null; state.projects = []; state.channels = []; state.threads = []; state.members = []; state.actors = []; state.messages = []; state.messageCursor = 0; state.eventCursor = 0; state.token = ''; state.me = null; sessionStorage.removeItem('commons_token'); state.project = null; state.channel = null; state.thread = null;
-    ui.signin.hidden = false; ui.workspace.hidden = true; ui.identity.hidden = true; ui.signout.hidden = true; ui.projects.replaceChildren(); ui.channels.textContent = 'Sign in to view projects';
+    ui.signin.hidden = false; ui.workspace.hidden = true; ui.identity.hidden = true; ui.setPassword.hidden = true; $('#search-form').hidden = true; $('#search-input').value = ''; ui.signout.hidden = true; ui.projects.replaceChildren(); ui.channels.textContent = 'Sign in to view projects';
     if (message) $('#signin-error').textContent = message;
   }
   function renderIdentity() {
     const me = state.me; if (!me) return;
-    $('#new-project').disabled = me.kind !== 'human';
+    $('#new-project').disabled = me.kind !== 'human'; ui.setPassword.hidden = !(me.kind === 'human' && !me.has_password);
     ui.identity.replaceChildren(); const avatar = document.createElement('span'); avatar.className = 'avatar'; avatar.textContent = initials(me.name); const label = document.createElement('span'); label.textContent = `${actorLabel(me)} · ${actorDetail(me)}`; ui.identity.append(avatar, label);
   }
-  async function enterWorkspace(me, generation, suggestPassword = false) {
+  async function enterWorkspace(me, generation) {
     if (generation !== state.authGeneration) return;
     state.me = me; $('#invitation-view').hidden = true; $('#token-input').value = ''; $('#login-password').value = '';
     ui.signin.hidden = true; ui.workspace.hidden = false; ui.identity.hidden = false; ui.signout.hidden = false; renderIdentity();
     await loadProjects(); if (generation !== state.authGeneration) return; setStatus('Connected');
-    if (suggestPassword && me.kind === 'human' && !me.has_password) showAccount();
   }
   async function signIn(token) {
     state.authGeneration++; const generation = state.authGeneration; state.token = token.trim(); if (!state.token) return;
     setStatus('Connecting', 'busy'); $('#signin-error').textContent = '';
-    try { const me = await api('/me', { silent401: true }); if (generation !== state.authGeneration) return; sessionStorage.setItem('commons_token', state.token); await enterWorkspace(me, generation, true); }
+    try { const me = await api('/me', { silent401: true }); if (generation !== state.authGeneration) return; sessionStorage.setItem('commons_token', state.token); await enterWorkspace(me, generation); }
     catch (error) { if (generation !== state.authGeneration) return; clearAuth('', false); $('#signin-error').textContent = error.message === 'Authentication required' ? 'This token is not valid.' : error.message; setStatus('Sign in required', 'offline'); }
   }
   async function passwordSignIn(handle, password, remember = false) {
@@ -88,7 +87,7 @@
   }
   async function restoreSession() {
     const generation = ++state.authGeneration;
-    try { const me = await api('/me', { silent401: true }); if (generation !== state.authGeneration) return; await enterWorkspace(me, generation, !!state.token); }
+    try { const me = await api('/me', { silent401: true }); if (generation !== state.authGeneration) return; await enterWorkspace(me, generation); }
     catch (error) { if (generation !== state.authGeneration) return; if (error.message === 'Authentication required') { clearAuth('', false); $('#signin-error').textContent = ''; setStatus('Ready'); } else { $('#signin-error').textContent = error.message; setStatus('Unable to connect', 'offline'); } }
   }
   async function signOut() {
@@ -187,10 +186,10 @@
   async function selectProject(project) {
     if (state.project?.id !== project.id) { state.channel = null; state.thread = null; state.messages = []; state.eventCursor = 0; }
     state.projectGeneration++; stopPolling(); state.pollBusy = false; state.navigationGeneration++; state.project = project; state.channel = null; state.thread = null; state.channels = []; state.members = []; ui.channels.replaceChildren(); renderProjects(); renderProjectHeader(); updateNameControls();
-    $('#new-channel').disabled = false; $('#members-open').disabled = false; $('#rules-open').disabled = false;
+    $('#new-channel').disabled = false; $('#search-form').hidden = false; $('#members-open').disabled = false; $('#rules-open').disabled = false;
     ui.channelCrumb.textContent = 'Choose a channel'; ui.channelTitle.textContent = 'Project overview'; ui.channelDescription.textContent = project.description || 'Choose a channel to view its conversations.'; ui.projectDescription.textContent = project.name.toUpperCase();
     clearSelection();
-    const generation = state.projectGeneration; try { await Promise.all([loadChannels(), loadMembers(), loadActors()]); if (generation !== state.projectGeneration || state.project?.id !== project.id) return; let after = 0; let snapshot = 0; let page; do { page = await api(`/projects/${encodeURIComponent(project.id)}/events?after=${after}&limit=100`); if (generation !== state.projectGeneration || state.project?.id !== project.id) return; snapshot = page.cursor ?? snapshot; const next = page.next_cursor; if (next === after) break; after = next; } while (after !== null && after !== undefined); state.eventCursor = snapshot; startPolling(); }
+    const generation = state.projectGeneration; try { await Promise.all([loadChannels(), loadMembers(), loadActors()]); if (generation !== state.projectGeneration || state.project?.id !== project.id) return; const page = await api(`/projects/${encodeURIComponent(project.id)}/events?after=2147483647&limit=1`); if (generation !== state.projectGeneration || state.project?.id !== project.id) return; state.eventCursor = page.cursor ?? 0; startPolling(); }
     catch (e) { if (e.message !== 'Authentication required') showError(e.message); }
   }
   function renderProjectHeader() { ui.projectCrumb.textContent = state.project?.name || 'Your workspace'; if (state.project) ui.projectDescription.textContent = state.project.name.toUpperCase(); }
@@ -211,10 +210,10 @@
       const b = document.createElement('button'); b.className = `nav-item${state.channel?.id === channel.id ? ' active' : ''}`; const symbol = document.createElement('span'); symbol.className = 'nav-symbol'; symbol.textContent = '#'; const label = document.createElement('span'); label.className = 'nav-label'; label.textContent = channel.name; b.append(symbol, label); b.addEventListener('click', () => selectChannel(channel)); ui.channels.append(b);
     }
   }
-  async function selectChannel(channel) {
+  async function selectChannel(channel, threadId = null) {
     state.navigationGeneration++; state.channel = channel; state.thread = null; renderChannels(); renderChannelHeader(); updateNameControls();
     $('#new-thread').hidden = false; $('#welcome-thread').hidden = false; ui.threadBar.hidden = true; ui.messagesPanel.hidden = true; ui.welcome.hidden = false;
-    try { await loadThreads(); if (state.threads.length) await selectThread(state.threads[0]); }
+    try { await loadThreads(); if (state.threads.length) await selectThread(state.threads.find(t => t.id === threadId) || state.threads[0]); }
     catch (e) { showError(e.message); }
   }
   async function loadThreads() {
@@ -291,16 +290,110 @@
     }
     ui.messages.scrollTop = initial || nearBottom ? ui.messages.scrollHeight : scrollTop;
   }
+  // Message formatting: fenced code, inline code and KaTeX math. Text only ever reaches the DOM through
+  // textContent/text nodes (KaTeX builds its own nodes from the TeX string), never through innerHTML.
+  const KATEX_OPTIONS = { throwOnError: false, trust: false, strict: 'ignore', maxExpand: 1000, maxSize: 20 };
+  function copyText(text) {
+    if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
+    return new Promise((resolve, reject) => {
+      const area = document.createElement('textarea'); area.value = text; area.style.position = 'fixed'; area.style.opacity = '0'; document.body.append(area); area.select();
+      try { document.execCommand('copy') ? resolve() : reject(new Error('copy failed')); } catch (e) { reject(e); } finally { area.remove(); }
+    });
+  }
+  function buildCodeBlock(code, lang) {
+    const block = document.createElement('div'); block.className = 'code-block';
+    const head = document.createElement('div'); head.className = 'code-head';
+    const label = document.createElement('span'); label.className = 'code-lang'; label.textContent = lang || ''; head.append(label);
+    const copy = document.createElement('button'); copy.type = 'button'; copy.className = 'code-copy'; copy.textContent = 'Copy'; copy.setAttribute('aria-label', lang ? `Copy ${lang} code` : 'Copy code');
+    copy.addEventListener('click', async () => {
+      try { await copyText(code); copy.textContent = 'Copied'; } catch { copy.textContent = 'Copy failed'; }
+      setTimeout(() => { copy.textContent = 'Copy'; }, 1500);
+    });
+    head.append(copy);
+    const pre = document.createElement('pre'); const codeEl = document.createElement('code'); codeEl.textContent = code; pre.append(codeEl); pre.tabIndex = 0;
+    block.append(head, pre); return block;
+  }
+  function buildMath(tex, display) {
+    const el = document.createElement(display ? 'div' : 'span'); el.className = display ? 'math math-display' : 'math math-inline';
+    const katex = window.katex;
+    if (katex && typeof katex.render === 'function') {
+      try { katex.render(tex, el, { ...KATEX_OPTIONS, displayMode: display }); el.dataset.tex = tex; return el; } catch { el.replaceChildren(); }
+    }
+    const raw = document.createElement('code'); raw.className = 'math-raw'; raw.textContent = tex; el.append(raw); return el;
+  }
+  // Split prose into text, inline code and math tokens. Code is matched first so math is never parsed inside it.
+  function tokenizeProse(src) {
+    const out = []; let buffer = ''; let i = 0;
+    const flush = () => { if (buffer) { out.push({ type: 'text', value: buffer }); buffer = ''; } };
+    while (i < src.length) {
+      const ch = src[i];
+      if (ch === '\\' && src[i + 1] === '$') { buffer += '$'; i += 2; continue; }
+      if (ch === '`') {
+        let n = 1; while (src[i + n] === '`') n++;
+        const fence = '`'.repeat(n); let close = src.indexOf(fence, i + n);
+        while (close !== -1 && src[close + n] === '`') { let run = close; while (src[run] === '`') run++; close = src.indexOf(fence, run); }
+        if (close > i + n) { flush(); out.push({ type: 'code', value: src.slice(i + n, close) }); i = close + n; continue; }
+        buffer += fence; i += n; continue;
+      }
+      if (ch === '$' && src[i + 1] === '$') {
+        const close = src.indexOf('$$', i + 2);
+        if (close > i + 2 && src.slice(i + 2, close).trim() && !src.slice(i + 2, close).includes('`')) { flush(); out.push({ type: 'display', value: src.slice(i + 2, close).trim() }); i = close + 2; continue; }
+        buffer += '$$'; i += 2; continue;
+      }
+      if (ch === '\\' && (src[i + 1] === '[' || src[i + 1] === '(')) {
+        const display = src[i + 1] === '['; const close = src.indexOf(display ? '\\]' : '\\)', i + 2);
+        if (close > i + 2 && src.slice(i + 2, close).trim() && !src.slice(i + 2, close).includes('`')) { flush(); out.push({ type: display ? 'display' : 'inline', value: src.slice(i + 2, close).trim() }); i = close + 2; continue; }
+      }
+      if (ch === '$' && src[i + 1] !== undefined && !/\s/.test(src[i + 1])) {
+        let close = -1;
+        for (let j = i + 1; j < src.length; j++) {
+          const c = src[j];
+          if (c === '`' || c === '\n') break;
+          if (c === '\\') { j++; continue; }
+          if (c === '$' && !/\s/.test(src[j - 1]) && !/\d/.test(src[j + 1] ?? '')) { close = j; break; }
+        }
+        if (close > i + 1) { flush(); out.push({ type: 'inline', value: src.slice(i + 1, close) }); i = close + 1; continue; }
+      }
+      buffer += ch; i++;
+    }
+    flush(); return out;
+  }
+  function renderProse(container, src) {
+    const tokens = tokenizeProse(src);
+    tokens.forEach((token, index) => {
+      if (token.type === 'text') {
+        let value = token.value; // Block elements already break the line, so drop one adjacent newline.
+        if (tokens[index - 1]?.type === 'display') value = value.replace(/^\n/, '');
+        if (tokens[index + 1]?.type === 'display') value = value.replace(/\n$/, '');
+        if (value) container.append(document.createTextNode(value));
+      } else if (token.type === 'code') { const code = document.createElement('code'); code.className = 'inline-code'; code.textContent = token.value; container.append(code); }
+      else container.append(buildMath(token.value, token.type === 'display'));
+    });
+  }
+  function renderRichText(container, text) {
+    container.replaceChildren();
+    const lines = String(text).split('\n'); let prose = []; let code = null; let lang = '';
+    const flushProse = () => { if (prose.length) renderProse(container, prose.join('\n')); prose = []; };
+    for (const line of lines) {
+      if (code === null) {
+        const open = /^ {0,3}```[ \t]*([^\s`]*)[^`]*$/.exec(line);
+        if (open) { flushProse(); code = []; lang = open[1].slice(0, 30); } else prose.push(line);
+      } else if (/^ {0,3}```[ \t]*$/.test(line)) { container.append(buildCodeBlock(code.join('\n'), lang)); code = null; }
+      else code.push(line);
+    }
+    if (code !== null) container.append(buildCodeBlock(code.join('\n'), lang)); // Unclosed fence, e.g. a shortened preview.
+    flushProse();
+  }
   function buildMessage(m, root = m) {
     const article = document.createElement('article'); article.className = 'message'; article.dataset.messageId = m.id;
     const avatar = document.createElement('div'); avatar.className = `message-avatar${m.author?.kind === 'agent' ? ' agent' : ''}`; avatar.textContent = initials(m.author?.name); article.append(avatar);
     const main = document.createElement('div'); main.className = 'message-main';
     const meta = document.createElement('div'); meta.className = 'message-meta';
     const author = document.createElement('span'); author.className = 'message-author'; author.textContent = actorLabel(m.author); meta.append(author);
-    const badge = document.createElement('span'); badge.className = `badge${m.author?.kind === 'agent' ? ' agent' : ''}`; badge.textContent = actorDetail(m.author); meta.append(badge);
+    const badge = document.createElement('span'); badge.className = `badge${m.author?.kind === 'agent' ? ' agent' : ''}`; badge.textContent = m.author?.kind === 'agent' ? 'Agent' : 'Human'; if (m.author?.owner) { const full = actorDetail(m.author); badge.title = full; const hidden = document.createElement('span'); hidden.className = 'visually-hidden'; hidden.textContent = ` (${full})`; badge.append(hidden); } meta.append(badge);
     const time = document.createElement('time'); time.className = 'message-time'; time.textContent = formatDate(m.created_at); time.dateTime = m.created_at || ''; meta.append(time); main.append(meta);
     const text = String(m.text ?? ''); const content = document.createElement('div'); content.className = 'message-text';
-    const expanded = expandedMessages.has(m.id); content.textContent = text.length > 800 && !expanded ? `${text.slice(0, 800)}…` : text; main.append(content);
+    const expanded = expandedMessages.has(m.id); renderRichText(content, text.length > 800 && !expanded ? `${text.slice(0, 800)}…` : text); main.append(content);
     if (text.length > 800) {
       const toggle = document.createElement('button'); toggle.type = 'button'; toggle.className = 'detail-toggle'; toggle.dataset.messageAction = 'detail'; toggle.textContent = expanded ? 'Show less' : `Read full message (${text.length.toLocaleString()} characters)`; toggle.setAttribute('aria-expanded', String(expanded));
       toggle.addEventListener('click', () => { if (expandedMessages.has(m.id)) expandedMessages.delete(m.id); else expandedMessages.add(m.id); renderMessages(); }); main.append(toggle);
@@ -320,6 +413,10 @@
           state.messages = state.messages.map(message => message.id === fresh.id ? fresh : message); renderMessages();
         } catch (error) { showError(error.message); button.disabled = false; }
       }); reactions.append(button);
+    }
+    for (const reaction of m.reactions || []) {
+      if (REACTIONS.includes(reaction.emoji) || !reaction.count) continue;
+      const shown = document.createElement('span'); shown.className = 'reaction-count'; shown.textContent = `${reaction.emoji} ${reaction.count}`; shown.title = `${reaction.emoji}: ${(reaction.actors || []).map(actorLabel).join(', ')}`; reactions.append(shown);
     }
     actions.append(reactions); main.append(actions); article.append(main); return article;
   }
@@ -651,10 +748,55 @@
       const note = document.createElement('p'); note.className = 'modal-copy'; note.textContent = 'Add the agent to this project from People to give it access.'; wrap.append(note); const actions = document.createElement('div'); actions.className = 'modal-actions'; const done = document.createElement('button'); done.type = 'button'; done.className = 'primary-button'; done.textContent = 'Done'; done.addEventListener('click', async () => { ui.modal.close(); await loadActors(); await showMembers(); }); actions.append(done); wrap.append(actions); openModal('Agent created', 'ONE-TIME TOKEN', wrap);
     });
   }
+  // Project search: results open in the shared modal; choosing one jumps to its channel and conversation.
+  async function goToMessage(hit) {
+    const channel = state.channels.find(c => c.id === hit.thread.channel_id);
+    if (!channel) { showError('That channel is no longer available.'); return; }
+    if (state.channel?.id !== channel.id) await selectChannel(channel, hit.thread.id);
+    else if (state.thread?.id !== hit.thread.id) {
+      let thread = state.threads.find(t => t.id === hit.thread.id);
+      if (!thread) { await loadThreads(); thread = state.threads.find(t => t.id === hit.thread.id); }
+      if (thread) await selectThread(thread);
+    }
+    if (state.thread?.id !== hit.thread.id) return;
+    const parent = hit.message.reply_to;
+    if (parent && !expandedReplies.has(parent)) { expandedReplies.add(parent); renderMessages(); }
+    const target = [...ui.messages.querySelectorAll('[data-message-id]')].find(el => el.dataset.messageId === hit.message.id);
+    if (!target) { showError('That message is not loaded in this conversation.'); return; }
+    target.scrollIntoView?.({ block: 'center' }); target.classList.add('search-hit'); setTimeout(() => target.classList.remove('search-hit'), 2600);
+  }
+  function buildSearchResult(hit) {
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'search-result';
+    const snippet = document.createElement('span'); snippet.className = 'search-snippet'; snippet.textContent = hit.snippet;
+    const meta = document.createElement('span'); meta.className = 'search-meta'; meta.textContent = [hit.thread.title, hit.message.author?.name, formatDate(hit.message.created_at)].filter(Boolean).join(' · ');
+    button.append(snippet, meta); button.addEventListener('click', () => { ui.modal.close(); goToMessage(hit); }); return button;
+  }
+  async function runSearch(query) {
+    const project = state.project; const generation = state.projectGeneration; if (!project) return;
+    const wrap = document.createElement('div'); const list = document.createElement('div'); list.className = 'search-results';
+    const status = document.createElement('div'); status.className = 'modal-copy search-status'; status.textContent = 'Searching…';
+    const more = document.createElement('button'); more.type = 'button'; more.className = 'secondary-button search-more'; more.textContent = 'Load more'; more.hidden = true;
+    wrap.append(status, list, more); openModal('Search results', `${project.name.toUpperCase()}`, wrap);
+    let before = null; let count = 0;
+    async function load() {
+      more.disabled = true;
+      try {
+        const params = new URLSearchParams({ q: query, limit: '20' }); if (before !== null) params.set('before', String(before));
+        const page = await api(`/projects/${encodeURIComponent(project.id)}/search?${params}`);
+        if (generation !== state.projectGeneration || state.project?.id !== project.id) return;
+        for (const hit of page.items || []) list.append(buildSearchResult(hit));
+        count += (page.items || []).length; before = page.next_before ?? null; more.hidden = before === null;
+        status.textContent = count ? `${count} ${count === 1 ? 'message' : 'messages'} for “${query}”, newest first${before === null ? '' : ' (more available)'}` : `No messages match “${query}”.`;
+      } catch (e) { if (e.message !== 'Authentication required') { status.textContent = e.message; status.classList.add('modal-alert'); } }
+      finally { more.disabled = false; }
+    }
+    more.addEventListener('click', load); await load();
+  }
+  $('#search-form').addEventListener('submit', event => { event.preventDefault(); const query = $('#search-input').value.trim(); if (query) runSearch(query); });
   $('#signin-form').addEventListener('submit', e => { e.preventDefault(); signIn($('#token-input').value); });
   $('#toggle-token').addEventListener('click', () => { const input = $('#token-input'); const shown = input.type === 'text'; input.type = shown ? 'password' : 'text'; $('#toggle-token').textContent = shown ? 'Show' : 'Hide'; $('#toggle-token').setAttribute('aria-label', shown ? 'Show token' : 'Hide token'); });
   $('#signout').addEventListener('click', () => signOut()); ui.composer.addEventListener('submit', sendMessage); ui.input.addEventListener('input', updateComposer); ui.input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ui.composer.requestSubmit(); } });
-  $('#account-button').addEventListener('click', showAccount);
+  $('#account-button').addEventListener('click', showAccount); ui.setPassword.addEventListener('click', showAccount);
   $('#use-token').addEventListener('click', () => { const form = $('#signin-form'); form.hidden = !form.hidden; $('#use-token').setAttribute('aria-expanded', String(!form.hidden)); });
   $('#password-signin-form').addEventListener('submit', async event => { event.preventDefault(); const button = event.currentTarget.querySelector('[type=submit]'); button.disabled = true; try { await passwordSignIn($('#login-handle').value, $('#login-password').value, $('#login-remember').checked); } finally { button.disabled = false; } });
   const savedToken = state.token;

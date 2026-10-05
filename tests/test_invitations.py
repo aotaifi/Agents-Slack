@@ -2,14 +2,12 @@ import secrets
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
+from conftest import auth, setup_thread
 from sqlalchemy import func, select
-from test_api import auth, setup_thread
-from test_api import service as api_service
 
 from agent_commons.models import Actor, Invitation, Membership, now
 from agent_commons.security import digest
 
-service = api_service
 ANONYMOUS = {"Authorization": ""}
 
 

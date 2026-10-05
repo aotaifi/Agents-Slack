@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 from datetime import timedelta, timezone
 from pathlib import Path
@@ -11,7 +12,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Res
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, select, text, update
+from sqlalchemy import and_, func, literal_column, select, text, update
+from sqlalchemy.dialects.postgresql import to_tsvector, websearch_to_tsquery
 from sqlalchemy.orm import Session, object_session
 
 from .db import make_engine, session_factory
@@ -116,21 +118,97 @@ def member_json(db, m):
     return {"actor": actor_json(db.get(Actor, m.actor_id)), "role": m.role, "muted": m.muted}
 
 
+def messages_json(db, messages):
+    """Serialize messages with a constant number of queries."""
+    messages = list(messages)
+    if not messages:
+        return []
+    ids = [m.id for m in messages]
+    actors = {}
+    author_ids = {m.author_id for m in messages}
+    if author_ids:
+        actors.update({a.id: a for a in db.scalars(select(Actor).where(Actor.id.in_(author_ids)))})
+    owner_ids = {a.owner_id for a in actors.values() if a.owner_id} - actors.keys()
+    if owner_ids:
+        actors.update({a.id: a for a in db.scalars(select(Actor).where(Actor.id.in_(owner_ids)))})
+    groups = {}
+    for reaction, actor in db.execute(
+        select(Reaction, Actor)
+        .join(Actor, Actor.id == Reaction.actor_id)
+        .where(Reaction.message_id.in_(ids))
+        .order_by(Reaction.emoji, Actor.handle, Actor.id)
+    ):
+        groups.setdefault(reaction.message_id, {}).setdefault(reaction.emoji, []).append(
+            reaction_actor(actor)
+        )
+    reply_counts = dict(
+        db.execute(
+            select(Message.reply_to, func.count())
+            .where(Message.reply_to.in_(ids))
+            .group_by(Message.reply_to)
+        ).all()
+    )
+    result = []
+    for m in messages:
+        author = actors[m.author_id]
+        owner = actors.get(author.owner_id) if author.owner_id else None
+        result.append(
+            {
+                **{
+                    k: getattr(m, k)
+                    for k in ("id", "thread_id", "project_id", "text", "mentions", "sequence")
+                },
+                "author": {
+                    **{
+                        k: getattr(author, k)
+                        for k in ("id", "name", "handle", "kind", "owner_id", "is_admin")
+                    },
+                    "owner": {k: getattr(owner, k) for k in ("id", "name", "handle")}
+                    if owner
+                    else None,
+                },
+                "metadata": m.data,
+                "reply_to": m.reply_to,
+                "reactions": [
+                    {"emoji": emoji, "actors": people, "count": len(people)}
+                    for emoji, people in groups.get(m.id, {}).items()
+                ],
+                "reply_count": reply_counts.get(m.id, 0),
+                "created_at": timestamp(m.created_at),
+            }
+        )
+    return result
+
+
+SNIPPET_WIDTH = 200
+# PostgreSQL search first looks at this many of the newest sequence numbers (see search_messages).
+SEARCH_RECENT_WINDOW = 2000
+
+
+def search_snippet(body, terms):
+    """Plain-text excerpt of about SNIPPET_WIDTH characters around the first match."""
+    flat = " ".join(body.split())
+    lowered = flat.lower()
+    found = [lowered.find(t) for t in terms if t] if len(lowered) == len(flat) else []
+    hits = [i for i in found if i >= 0]
+    at = min(hits) if hits else 0
+    start = max(0, min(at - SNIPPET_WIDTH // 4, len(flat) - SNIPPET_WIDTH))
+    end = min(len(flat), start + SNIPPET_WIDTH)
+    return ("…" if start else "") + flat[start:end].strip() + ("…" if end < len(flat) else "")
+
+
+def search_clause(dialect, q):
+    """Message filter and snippet terms for a search string."""
+    if dialect == "postgresql":
+        vector = to_tsvector(literal_column("'simple'"), Message.text)
+        match = vector.bool_op("@@")(websearch_to_tsquery(literal_column("'simple'"), q))
+        return match, re.findall(r"\w+", q.lower())
+    terms = q.lower().split()
+    return and_(*(func.ulower(Message.text).contains(t, autoescape=True) for t in terms)), terms
+
+
 def message_json(db, m):
-    return {
-        **{
-            k: getattr(m, k)
-            for k in ("id", "thread_id", "project_id", "text", "mentions", "sequence")
-        },
-        "author": actor_json(db.get(Actor, m.author_id)),
-        "metadata": m.data,
-        "reply_to": m.reply_to,
-        "reactions": reactions_json(db, m.id),
-        "reply_count": db.scalar(
-            select(func.count()).select_from(Message).where(Message.reply_to == m.id)
-        ),
-        "created_at": timestamp(m.created_at),
-    }
+    return messages_json(db, [m])[0]
 
 
 def event_json(e):
@@ -1445,14 +1523,19 @@ def create_app(database_url: str | None = None):
             return value
 
         rules = clipped({"text": p.rules, "version": p.rules_version}, max_chars // 4)
-        trigger_data = clipped(message_json(db, trigger), max_chars // 4) if trigger else None
-        parent_data = clipped(message_json(db, parent), max_chars // 4) if parent else None
+        selected = rows[:limit]
+        wanted = [*selected, *filter(None, [trigger, parent])]
+        serialized = messages_json(db, wanted)
+        serialized_by_id = {v["id"]: v for v in serialized}
+        trigger_data = (
+            clipped(dict(serialized_by_id[trigger.id]), max_chars // 4) if trigger else None
+        )
+        parent_data = clipped(dict(serialized_by_id[parent.id]), max_chars // 4) if parent else None
         # Distribute remaining text over recent messages, giving newer messages first claim.
         recent = []
-        selected = rows[:limit]
         for index, message in enumerate(selected):
             allowance = remaining // (len(selected) - index)
-            recent.append(clipped(message_json(db, message), allowance))
+            recent.append(clipped(dict(serialized_by_id[message.id]), allowance))
         recent.reverse()
         return {
             "thread": thread_json(t),
@@ -1531,7 +1614,7 @@ def create_app(database_url: str | None = None):
             )
         )
         return {
-            "items": [message_json(db, m) for m in rows[:limit]],
+            "items": messages_json(db, rows[:limit]),
             "next_cursor": rows[limit - 1].sequence if len(rows) > limit else None,
             "cursor": snapshot,
         }
@@ -1557,6 +1640,68 @@ def create_app(database_url: str | None = None):
         return {
             "items": [event_json(e) for e in rows[:limit]],
             "next_cursor": rows[limit - 1].id if len(rows) > limit else None,
+            "cursor": snapshot,
+        }
+
+    @app.get("/v1/projects/{project_id}/search")
+    def search_messages(
+        project_id: str,
+        q: str = Query(...),
+        limit: int = Query(20, ge=1, le=50),
+        before: int | None = Query(None, ge=1),
+        a=Depends(authenticated, scope="function"),
+        db: Session = Depends(session, scope="function"),
+    ):
+        q = q.strip()
+        if not 1 <= len(q) <= 200:
+            raise HTTPException(422, "q must be 1-200 characters")
+        p = project_access(db, a, project_id)
+        snapshot = p.cursor
+        match, terms = search_clause(db.get_bind().dialect.name, q)
+        conditions = [Message.project_id == p.id, Message.sequence <= snapshot, match]
+        if before is not None:
+            conditions.append(Message.sequence < before)
+        newest_first = select(Message).where(*conditions).limit(limit + 1)
+        rows = []
+        if db.get_bind().dialect.name == "postgresql":
+            # Walking the (project_id, sequence) index backwards is ideal for a word in most
+            # messages but filters the whole project for a rare one. A bounded walk over the
+            # newest messages answers the first case at once; if it does not fill the page the
+            # real order is computed from the GIN matches, where `+ 0` keeps the planner from
+            # picking the backwards index scan. Both return the same rows in the same order.
+            upper = snapshot if before is None else min(snapshot, before - 1)
+            rows = list(
+                db.scalars(
+                    newest_first.where(Message.sequence > upper - SEARCH_RECENT_WINDOW).order_by(
+                        Message.sequence.desc()
+                    )
+                )
+            )
+            order = (Message.sequence + 0).desc()
+        else:
+            order = Message.sequence.desc()
+        if len(rows) <= limit:
+            rows = list(db.scalars(newest_first.order_by(order)))
+        page = rows[:limit]
+        threads = {
+            t.id: t
+            for t in db.scalars(select(Thread).where(Thread.id.in_({m.thread_id for m in page})))
+        }
+        items = [
+            {
+                "message": message,
+                "thread": {
+                    "id": threads[row.thread_id].id,
+                    "title": threads[row.thread_id].title,
+                    "channel_id": threads[row.thread_id].channel_id,
+                },
+                "snippet": search_snippet(row.text, terms),
+            }
+            for row, message in zip(page, messages_json(db, page), strict=True)
+        ]
+        return {
+            "items": items,
+            "next_before": page[-1].sequence if len(rows) > limit else None,
             "cursor": snapshot,
         }
 

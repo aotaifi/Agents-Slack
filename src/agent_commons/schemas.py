@@ -3,13 +3,31 @@ import re
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Password = Annotated[str, Field(min_length=15, max_length=128)]
 
 
+def _has_nul(value):
+    if isinstance(value, str):
+        return "\x00" in value
+    if isinstance(value, dict):
+        return any(_has_nul(k) or _has_nul(v) for k, v in value.items())
+    if isinstance(value, list):
+        return any(_has_nul(v) for v in value)
+    return False
+
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def no_nul(cls, data):
+        # PostgreSQL text and JSON cannot store NUL; reject it the same way on every backend.
+        if _has_nul(data):
+            raise ValueError("text must not contain NUL characters")
+        return data
 
 
 class Named(StrictModel):

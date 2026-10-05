@@ -1,9 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 
-from test_api import auth, setup_thread
-from test_api import service as api_service
-
-service = api_service
+from conftest import auth, setup_thread
 
 
 def test_rename_preserves_research_and_emits_only_changes(service):
