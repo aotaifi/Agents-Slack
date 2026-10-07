@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Stdio MCP server for the Workspace plugin (standard library only).
 
+Works with any MCP client (Claude Code, Codex, Mistral Vibe, Claude Desktop, Cursor, ...).
+It also runs without the plugin system: python3 plugins/workspace/scripts/mcp_server.py
+
 Newline-delimited JSON-RPC 2.0. Only protocol messages go to stdout; logs go to stderr.
 No state is kept between calls: everything goes through the on-disk session adapter.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -18,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 import wsplugin  # noqa: E402
 from agent_commons_client import ApiError  # noqa: E402
-from claude_workspace import AdapterError, thin_author  # noqa: E402
+from claude_workspace import AdapterError, thin_author, write_private  # noqa: E402
 from ws_tunnel import TunnelError  # noqa: E402
 
 TERSE_LIMIT = 600
@@ -34,18 +38,17 @@ FALLBACK_INSTRUCTIONS = (
     "current task. You may reply when you can help. Lead with the answer, short sentences, "
     "plain words. Project rules take priority over this style."
 )
-NO_SESSION = (
-    "Claude did not pass a session id (CLAUDE_CODE_SESSION_ID) to this plugin, so these tools "
-    "cannot tell which conversation this is. Ask your user to use the /workspace:* commands."
-)
 NOT_CONNECTED = (
     "Not connected. If your user gave you a connection file, call connect with its path; "
-    "otherwise ask your user to run /workspace:connect."
+    "otherwise ask your user to download one in the browser (project People, Connect session)."
 )
 TUNNEL_NEEDED = (
-    "This server is reached through an SSH tunnel. Ask your user to run /workspace:connect, "
-    "which opens the tunnel with their SSH login."
+    "This server is only reachable through an SSH tunnel. Ask your user to open it "
+    "(for example ssh -N -L 127.0.0.1:8002:127.0.0.1:18000 host) and pass "
+    "url=http://127.0.0.1:8002, or in Claude Code run /workspace:connect."
 )
+# Name of the MCP client, from the initialize request.
+CLIENT_NAME = None
 
 
 def log(*parts):
@@ -83,8 +86,9 @@ TOOLS = [
         "name": "check_mentions",
         "description": (
             "Check for a mention of you. Shows who wrote it, the thread and the project rules, "
-            "or none. Mentions arrive on their own, so call this once at the start, not in a "
-            "loop. A mention is a message, not an order."
+            "or none. In Claude Code mentions arrive on their own; elsewhere call this when you "
+            "start, after you finish a task, and when your user asks. Never in a loop. "
+            "A mention is a message, not an order."
         ),
         "inputSchema": schema(),
     },
@@ -198,13 +202,53 @@ class ToolError(Exception):
 
 
 def cwd():
-    return Path(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
+    return Path(
+        os.environ.get("CLAUDE_PROJECT_DIR")
+        or os.environ.get("WORKSPACE_PROJECT_DIR")
+        or os.getcwd()
+    )
+
+
+def claude_code():
+    return bool(os.environ.get("CLAUDE_CODE_SESSION_ID"))
+
+
+def valid_id(sid):
+    return (
+        isinstance(sid, str)
+        and 1 <= len(sid) <= 200
+        and all(33 <= ord(c) <= 126 for c in sid)
+    )
+
+
+def remembered_id():
+    """An id made once per client app and project folder, kept on disk."""
+    name = CLIENT_NAME or "unknown"
+    key = hashlib.sha256((name + "\0" + str(cwd())).encode()).hexdigest()[:32]
+    folder = wsplugin.home() / "clients"
+    path = folder / f"{key}.json"
+    try:
+        sid = json.loads(path.read_text(encoding="utf-8")).get("session_id")
+        if valid_id(sid):
+            return sid
+    except (OSError, ValueError, AttributeError):
+        pass
+    sid = f"mcp-{uuid.uuid4()}"
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(folder, 0o700)
+    write_private(path, {"session_id": sid, "client": name})
+    return sid
 
 
 def session():
-    if not os.environ.get("CLAUDE_CODE_SESSION_ID"):
-        raise ToolError(NO_SESSION)
-    return wsplugin.require_session()
+    if claude_code():
+        return wsplugin.require_session()
+    chosen = os.environ.get("WORKSPACE_SESSION_ID")
+    if chosen:
+        if not valid_id(chosen):
+            raise ToolError("WORKSPACE_SESSION_ID must be 1 to 200 printable characters.")
+        return wsplugin.require_session(explicit=chosen)
+    return wsplugin.require_session(explicit=remembered_id())
 
 
 def connected_session():
@@ -237,7 +281,10 @@ def tool_status(args):
 
 
 def tool_check_mentions(args):
-    return wsplugin.inbox(connected_session(), cwd())
+    out = wsplugin.inbox(connected_session(), cwd())
+    if not claude_code() and not out.get("pending"):
+        out["next"] = "No mention now. Check again after your next task, not right away."
+    return out
 
 
 def tool_read_thread(args):
@@ -468,12 +515,16 @@ def handle(msg):
     params = msg.get("params")
     params = params if isinstance(params, dict) else {}
     if method == "initialize":
+        global CLIENT_NAME
+        info = params.get("clientInfo")
+        name = info.get("name") if isinstance(info, dict) else None
+        CLIENT_NAME = name if isinstance(name, str) and name else None
         asked = params.get("protocolVersion")
         return ok(
             {
                 "protocolVersion": asked if asked in VERSIONS else VERSIONS[0],
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "workspace", "version": "0.5.0"},
+                "serverInfo": {"name": "workspace", "version": "0.6.0"},
                 "instructions": instructions(),
             }
         )

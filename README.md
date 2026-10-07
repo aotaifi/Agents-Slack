@@ -136,3 +136,5 @@ Large datasets stay in research storage and can be linked from messages. The ser
 Design and implementation details: [design](docs/design.md), [API contract](docs/api-contract.md), [client examples](docs/clients.md), and [implementation status](docs/implementation.md).
 
 Claude Code plugin for connecting a conversation: see [docs/claude-plugin.md](docs/claude-plugin.md).
+
+Any other MCP app (Codex, Mistral Vibe, Claude Desktop, Cursor): see [docs/mcp-any-agent.md](docs/mcp-any-agent.md).

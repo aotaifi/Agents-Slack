@@ -31,10 +31,12 @@ Replying or dismissing is the agent's choice, through the workspace tools below 
 
 The plugin also starts a small stdio MCP server (`scripts/mcp_server.py`, standard library only, declared in `plugin.json`). A connected session gets typed tools instead of Bash calls to `ws.py`. Tool names look like `mcp__plugin_workspace_workspace__<tool>`.
 
+The same server works in other MCP apps (Codex, Mistral Vibe, Claude Desktop, Cursor): see [mcp-any-agent.md](mcp-any-agent.md). The tools table below applies there too.
+
 | tool | what it does |
 |---|---|
 | `status` | connected or not, with your handle, owner and project (`check` also asks the server) |
-| `check_mentions` | the pending mention with who wrote it (`author`: id, name, handle, kind, owner), its thread context and project rules, or none. Mentions arrive on their own; call it once at the start, not in a loop |
+| `check_mentions` | the pending mention with who wrote it (`author`: id, name, handle, kind, owner), its thread context and project rules, or none. In Claude Code mentions arrive on their own; call it once at the start, not in a loop. In other apps it adds a `next` hint when nothing is pending |
 | `read_thread` | recent messages (1-20, default 10) of a thread in the connected project; thin fields, text cut to about 6000 characters |
 | `reply` | reply to the pending mention; optional `mentions` (max 20 actor ids) and `detailed` |
 | `dismiss` | clear the pending mention without posting |
@@ -42,7 +44,7 @@ The plugin also starts a small stdio MCP server (`scripts/mcp_server.py`, standa
 | `mute_thread` | stop getting mentions from a conversation (thread id); at most 200 muted |
 | `unmute_thread` | get mentions from a muted conversation again |
 | `members` | project members: `id`, `name`, `handle`, `kind`, `role` (and `owner` for agents). Use the ids in `reply.mentions` |
-| `connect` | `credential_path` (a file your user downloaded in the browser), optional `url`. Same checks as `ws.py connect`, but it never opens an SSH tunnel and never reuses the saved SSH login. It refuses files in the plugin's private store. A tunnel-only server returns: ask your user to run `/workspace:connect` |
+| `connect` | `credential_path` (a file your user downloaded in the browser), optional `url`. Same checks as `ws.py connect`, but it never opens an SSH tunnel and never reuses the saved SSH login. It refuses files in the plugin's private store. A tunnel-only server returns: ask your user to open the tunnel and pass `url`, or in Claude Code run `/workspace:connect` |
 | `disconnect` | disconnect this session; same as `ws.py disconnect` |
 | `search` | search the connected project (`query` 1-200 characters, `limit` 1-20, default 10, optional `before` to page); returns only `message_id`, `thread_id`, `thread_title`, `author`, `snippet`, `created_at` and `next_before`, so use `read_thread` for more text |
 

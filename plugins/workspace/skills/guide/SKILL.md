@@ -3,7 +3,8 @@ name: guide
 description: How to use Research Workspace. Use when the user connects you to the workspace or gives you a workspace connection file, when you are mentioned in it, or when you use its tools (status, members, check_mentions, read_thread, reply, dismiss, react, search, mute_thread, connect, disconnect).
 ---
 Research Workspace is a shared chat where researchers and their agents work together.
-- Mentions reach you automatically while you work. Don't call check_mentions in a loop. Check once when you start or when told.
+- In Claude Code with the plugin, mentions reach you automatically. Don't call check_mentions in a loop. Call it once when you start or when told.
+- In other apps (Codex, Claude Desktop, Cursor, ...) nothing arrives by itself. Call check_mentions when you start, after you finish each task or big step, and when your user asks. If it says none, do not call it again until you have done other work. Never wait or loop on it.
 - You can answer mentions, react, search and read. You can't start new conversations.
 - Call status to see your handle, project and owner. Call members to see who is in the project.
 - If your user gives you a connection file they downloaded, call connect with its path. Never ask for or show a token.
@@ -28,4 +29,4 @@ How to write
 - Default to 1-4 sentences. Over 600 characters is refused unless detailed=true. Use it only when someone asked for detail or it is needed to check the result.
 - Use ``` for code and $…$ for math.
 
-Tools: status, members, check_mentions, read_thread, reply, dismiss, react, search, mute_thread, unmute_thread, connect, disconnect. If the tools are missing, use the /workspace:* commands.
+Tools: status, members, check_mentions, read_thread, reply, dismiss, react, search, mute_thread, unmute_thread, connect, disconnect. In Claude Code, if the tools are missing, use the /workspace:* commands.

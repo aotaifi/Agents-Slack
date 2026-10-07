@@ -138,12 +138,22 @@ def home(tmp_path):
     return tmp_path / "home", work
 
 
+def clean_env():
+    """The inherited environment without any Claude or Workspace session variables."""
+    drop = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_PROJECT_DIR", "WORKSPACE_SESSION_ID")
+    drop += ("WORKSPACE_PROJECT_DIR", "WORKSPACE_PLUGIN_HOME")
+    return {k: v for k, v in os.environ.items() if k not in drop and not k.startswith("CLAUDE")}
+
+
 class Client:
-    def __init__(self, base, work, session=SID):
-        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_SESSION_ID"}
-        env.update(WORKSPACE_PLUGIN_HOME=str(base), CLAUDE_PROJECT_DIR=str(work))
+    def __init__(self, base, work, session=SID, extra=None, claude_dir=True):
+        env = clean_env()
+        env.update(WORKSPACE_PLUGIN_HOME=str(base))
+        if claude_dir:
+            env["CLAUDE_PROJECT_DIR"] = str(work)
         if session:
             env["CLAUDE_CODE_SESSION_ID"] = session
+        env.update(extra or {})
         self.proc = subprocess.Popen(
             [sys.executable, str(SERVER)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, env=env, text=True, cwd=work,
@@ -177,8 +187,8 @@ class Client:
 def make(home):
     clients = []
 
-    def build(session=SID):
-        c = Client(*home, session=session)
+    def build(session=SID, **kwargs):
+        c = Client(*home, session=session, **kwargs)
         clients.append(c)
         return c
 
@@ -247,17 +257,26 @@ def test_tools_list_unknown_method_and_garbage_line(make):
     assert all(json.loads(x) for x in c.seen if x.strip())  # stdout is only JSON-RPC
 
 
-def test_missing_session_id_is_a_tool_error_for_every_tool(make, stub):
+def test_no_claude_session_id_is_not_an_error_for_any_tool(make, stub):
     c = make(session=None)
+    assert body(c.tool("status")) == {"connected": False}
     for name, a in (
-        ("status", {}), ("check_mentions", {}), ("read_thread", {"thread_id": THREAD}),
+        ("check_mentions", {}), ("read_thread", {"thread_id": THREAD}),
         ("reply", {"text": "hi"}), ("dismiss", {}),
         ("react", {"message_id": OTHER, "emoji": "👍"}),
         ("mute_thread", {"thread_id": THREAD}), ("search", {"query": "x"}),
-        ("members", {}), ("disconnect", {}), ("connect", {"credential_path": "/x.json"}),
+        ("members", {}),
     ):  # fmt: skip
         r = c.tool(name, **a)
-        assert r["isError"] and "/workspace:" in r["content"][0]["text"]
+        assert r["isError"] and "call connect with its path" in r["content"][0]["text"]
+        assert "download one in the browser" in r["content"][0]["text"]
+    assert Stub.log == []
+
+
+def test_invalid_workspace_session_id_is_a_tool_error(make, stub):
+    c = make(session=None, extra={"WORKSPACE_SESSION_ID": "has space"})
+    r = c.tool("status")
+    assert r["isError"] and "WORKSPACE_SESSION_ID" in r["content"][0]["text"]
     assert Stub.log == []
 
 
@@ -273,7 +292,7 @@ def test_unconnected_session_makes_no_requests(make, stub):
     ):  # fmt: skip
         r = c.tool(name, **a)
         assert r["isError"] and "call connect with its path" in r["content"][0]["text"]
-        assert "/workspace:connect" in r["content"][0]["text"]
+        assert "download one in the browser" in r["content"][0]["text"]
     assert Stub.log == []
 
 
@@ -565,7 +584,7 @@ def test_connect_tool_uses_the_url_in_the_file(make, home, stub, downloaded):
     assert body(c.tool("connect", credential_path=str(downloaded(url=stub))))["url"] == stub
 
 
-def test_connect_tool_refuses_the_private_store_and_missing_session(
+def test_connect_tool_refuses_the_private_store(
     make, home, stub, downloaded
 ):
     base, work = home
@@ -579,10 +598,6 @@ def test_connect_tool_refuses_the_private_store_and_missing_session(
     assert Stub.log == []
     c.close()
     assert all(TOKEN not in s for s in c.seen)
-    nosession = make(session=None)
-    r = nosession.tool("connect", credential_path=str(downloaded()), url=stub)
-    assert r["isError"] and "session id" in r["content"][0]["text"]
-    assert Stub.log == []
 
 
 def test_connect_tool_never_opens_a_tunnel_and_explains_tunnel_only_setups(
@@ -595,8 +610,9 @@ def test_connect_tool_never_opens_a_tunnel_and_explains_tunnel_only_setups(
     c = make()
     r = c.tool("connect", credential_path=str(downloaded(url="http://127.0.0.1:9")))
     assert r["isError"] and r["content"][0]["text"] == (
-        "This server is reached through an SSH tunnel. Ask your user to run "
-        "/workspace:connect, which opens the tunnel with their SSH login."
+        "This server is only reachable through an SSH tunnel. Ask your user to open it "
+        "(for example ssh -N -L 127.0.0.1:8002:127.0.0.1:18000 host) and pass "
+        "url=http://127.0.0.1:8002, or in Claude Code run /workspace:connect."
     )
     r = c.tool("connect", credential_path=str(downloaded()), url="http://example.com")
     assert r["isError"] and "HTTPS" in r["content"][0]["text"]
@@ -648,3 +664,122 @@ def test_skill_model_invocation_flags():
     assert "disable-model-invocation" not in front("status")
     for name in ("connect", "disconnect"):
         assert "disable-model-invocation: true" in front(name)
+
+
+# ---- any MCP client (no Claude variables) ----
+
+
+def like_codex(home, name="codex-mcp-client", extra=None, cwd=None):
+    """A server started the way Codex would: no CLAUDE_* variables, folder from WORKSPACE_*."""
+    base, work = home
+    env = {"WORKSPACE_PROJECT_DIR": str(cwd or work), **(extra or {})}
+    c = Client(base, work, session=None, extra=env, claude_dir=False)
+    if name:
+        c.rpc("initialize", {"protocolVersion": "2025-03-26", "clientInfo": {"name": name}})
+    return c
+
+
+@pytest.fixture
+def codex(home):
+    started = []
+
+    def build(**kwargs):
+        started.append(like_codex(home, **kwargs))
+        return started[-1]
+
+    yield build
+    for c in started:
+        if c.proc.poll() is None:
+            c.proc.kill()
+
+
+def test_works_like_codex_with_a_remembered_session(codex, home, stub, downloaded):
+    base, work = home
+    c = codex()
+    assert body(c.tool("status")) == {"connected": False}
+    r = c.tool("connect", credential_path=str(downloaded()), url=stub)
+    assert not r.get("isError"), r
+    out = body(c.tool("check_mentions"))["pending"]
+    assert out["message_id"] == TRIGGER
+    assert out["context"]["trigger_message"]["author"]["handle"] == "ana"
+    assert body(c.tool("reply", text="On it."))["reply_id"] == "posted"
+    (post,) = posts("/messages")
+    assert post[2]["reply_to"] == ROOT
+    assert post[3]["X-Workspace-Session"].startswith("mcp-")
+    Stub.event_id = 9
+    assert body(c.tool("check_mentions"))["pending"]["event_id"] == 9
+    assert body(c.tool("dismiss"))["acknowledged_event"] == 9
+    c.close()
+    assert all(TOKEN not in s for s in c.seen)
+    # Same app and folder: same remembered id, so still connected.
+    again = codex()
+    assert body(again.tool("status"))["connected"] is True
+    # Another app name: a different id, so not connected.
+    other = codex(name="vibe")
+    assert body(other.tool("status")) == {"connected": False}
+    # No initialize at all counts as "unknown".
+    nameless = codex(name=None)
+    assert body(nameless.tool("status")) == {"connected": False}
+    # Same app, other folder: not connected.
+    folder = work / "elsewhere"
+    folder.mkdir()
+    assert body(codex(cwd=folder).tool("status")) == {"connected": False}
+
+
+def test_remembered_id_file_is_private_and_bad_ones_are_replaced(codex, home):
+    base, _ = home
+    c = codex()
+    c.tool("status")
+    (file,) = (base / "clients").glob("*.json")
+    assert len(file.stem) == 32
+    assert file.stat().st_mode & 0o777 == 0o600
+    assert (base / "clients").stat().st_mode & 0o777 == 0o700
+    data = json.loads(file.read_text())
+    assert data["client"] == "codex-mcp-client" and data["session_id"].startswith("mcp-")
+    c.close()
+    file.write_text(json.dumps({"session_id": "bad id"}))
+    again = codex()
+    again.tool("status")
+    new = json.loads(file.read_text())
+    assert new["session_id"].startswith("mcp-") and new["session_id"] != "bad id"
+    again.close()
+    file.write_text("not json")
+    codex().tool("status")
+    assert json.loads(file.read_text())["session_id"].startswith("mcp-")
+
+
+def test_workspace_session_id_is_shared_between_clients(codex, home, stub, downloaded):
+    extra = {"WORKSPACE_SESSION_ID": "shared-1"}
+    first = codex(name="codex-mcp-client", extra=extra)
+    r = first.tool("connect", credential_path=str(downloaded()), url=stub)
+    assert not r.get("isError"), r
+    second = codex(name="cursor", extra=extra)
+    assert body(second.tool("status"))["connected"] is True
+    assert not (home[0] / "clients").exists()
+    third = codex(name="cursor", extra={"WORKSPACE_SESSION_ID": "shared-2"})
+    assert body(third.tool("status")) == {"connected": False}
+
+
+def test_claude_session_id_wins_over_workspace_session_id(make, connected):
+    c = make(extra={"WORKSPACE_SESSION_ID": "something-else"})
+    assert body(c.tool("status"))["connected"] is True  # SID is the connected one
+    assert not (connected[0] / "clients").exists()
+
+
+def test_next_hint_only_outside_claude_code_when_nothing_is_pending(
+    make, codex, connected, stub, downloaded
+):
+    claude = make()
+    assert claude.tool("check_mentions")
+    claude.tool("dismiss")
+    assert body(claude.tool("check_mentions")) == {"pending": None}  # no hint in Claude Code
+    # Connect a Codex-like session to the same stub; the cursor starts at the first page.
+    c = codex()
+    assert not c.tool("connect", credential_path=str(downloaded()), url=stub).get("isError")
+    first = body(c.tool("check_mentions"))
+    assert first["pending"] and "next" not in first
+    c.tool("dismiss")
+    Stub.event_id = 8
+    idle = body(c.tool("check_mentions"))
+    assert idle["pending"] is None
+    assert idle["next"] == "No mention now. Check again after your next task, not right away."

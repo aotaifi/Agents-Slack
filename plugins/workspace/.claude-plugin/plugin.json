@@ -1,6 +1,6 @@
 {
   "name": "workspace",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Connect one Claude conversation to Research Workspace mentions, with optional SSH tunnel.",
   "author": {
     "name": "Research Workspace"
